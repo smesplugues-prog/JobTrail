@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0f766e">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://generativelanguage.googleapis.com https://r.jina.ai https://cdn.jsdelivr.net; worker-src blob:; frame-src about:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>JobTrail – Job search dashboard</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -50,6 +51,8 @@
   <dialog id="appDialog" class="drawer"></dialog>
   <dialog id="profileDialog" class="drawer"></dialog>
   <dialog id="jobDialog" class="drawer"></dialog>
+  <dialog id="aiDialog" class="drawer wide"></dialog>
+  <dialog id="cvDialog" class="drawer wide"></dialog>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
 
   <script src="app.js"></script>
