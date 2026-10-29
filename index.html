@@ -21,7 +21,9 @@
         <a href="#dashboard" data-nav="dashboard">Dashboard</a>
         <a href="#jobs" data-nav="jobs">Jobs to Review</a>
         <a href="#applications" data-nav="applications">Applications</a>
+        <a href="#calendar" data-nav="calendar">Interviews Calendar</a>
       </nav>
+      <button class="btn ghost theme-btn" type="button" data-action="toggle-theme" aria-pressed="false" aria-label="Dark mode"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg><span class="theme-label">Dark</span></button>
       <button class="btn ghost" type="button" data-action="open-profile">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
         <span>Profile</span>
@@ -44,6 +46,10 @@
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
       <span>Applications</span>
     </a>
+    <a href="#calendar" data-nav="calendar">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+      <span>Calendar</span>
+    </a>
   </nav>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -53,6 +59,7 @@
   <dialog id="jobDialog" class="drawer"></dialog>
   <dialog id="aiDialog" class="drawer wide"></dialog>
   <dialog id="cvDialog" class="drawer wide"></dialog>
+  <dialog id="calDialog" class="drawer wide"></dialog>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
 
   <script src="app.js"></script>

@@ -14,7 +14,7 @@ const LIB = {
   docx: { src: 'https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js', integrity: 'sha384-nFoSjZIoH3CCp8W639jJyQkuPHinJ2NHe7on1xvlUA7SuGfJAfvMldrsoAVm6ECz' }
 };
 const emptyCv = () => ({ text: '', name: '', updatedAt: null });
-const defaultSettings = () => ({ model: DEFAULT_MODEL, autoAnalyze: true, pageReader: true, redact: true });
+const defaultSettings = () => { const h = browserTz(); return { model: DEFAULT_MODEL, autoAnalyze: true, pageReader: true, redact: true, theme: 'system', homeTz: h, altTz: h === 'Europe/London' ? 'Europe/Madrid' : 'Europe/London' }; };
 const STAGES = ['Applied', 'Interviewing', 'Offer', 'Rejected', 'Withdrawn'];
 const INACTIVE = ['Rejected', 'Withdrawn'];
 const ARR = ['Remote', 'Hybrid', 'On-site'];
@@ -78,6 +78,8 @@ function seed() {
     demoSeeded: true,
     cv: emptyCv(),
     settings: defaultSettings(),
+    interviews: [],
+    unavail: [],
     profile: { role: 'Data Analyst', location: 'New York, NY', level: 'mid', skills: ['SQL', 'Excel', 'Tableau', 'Python'], arrangements: ['Hybrid', 'Remote'], salaryMin: 75000, customized: false },
     jobs,
     applications: [app],
@@ -89,6 +91,10 @@ function seed() {
     ]
   };
   syncFollowUp(app, s);
+  const hz = s.settings.homeTz, d3 = addDays(t, 3), d1 = addDays(t, 1);
+  const iStart = zonedToUtc(d3, '16:00', 'Europe/London', true), uStart = zonedToUtc(d1, '09:00', hz, true), uEnd = zonedToUtc(d1, '17:00', hz, true);
+  s.interviews.push({ id: 'demo-iv-harborlight', demo: true, jobId: 'demo-harborlight', company: '', title: '', type: 'Phone screen', date: d3, time: '16:00', tz: 'Europe/London', dur: 30, start: iStart, end: iStart + 30 * 60000, link: '', notes: 'Demo interview: edit or delete it. It was entered as 16:00 UK time.' });
+  s.unavail.push({ id: 'demo-un-work', demo: true, label: 'Day job (demo)', date: d1, until: '', allDay: false, startTime: '09:00', endTime: '17:00', tz: hz, start: uStart, end: uEnd });
   return s;
 }
 
@@ -100,6 +106,12 @@ function normalize(s) {
   const p = s.profile;
   if (!s.cv || typeof s.cv.text !== 'string') s.cv = emptyCv();
   s.settings = Object.assign(defaultSettings(), s.settings && typeof s.settings === 'object' ? s.settings : {});
+  if (!validTz(s.settings.homeTz)) s.settings.homeTz = browserTz();
+  if (!validTz(s.settings.altTz)) s.settings.altTz = s.settings.homeTz === 'Europe/London' ? 'Europe/Madrid' : 'Europe/London';
+  if (!['system', 'light', 'dark'].includes(s.settings.theme)) s.settings.theme = 'system';
+  const okEv = o => o && typeof o.id === 'string' && Number.isFinite(o.start) && Number.isFinite(o.end) && o.end > o.start;
+  s.interviews = (Array.isArray(s.interviews) ? s.interviews : []).filter(okEv).map(i => Object.assign({}, i, { tz: validTz(i.tz) ? i.tz : s.settings.homeTz, dur: Number(i.dur) || Math.round((i.end - i.start) / 60000), type: IV_TYPES.includes(i.type) ? i.type : 'Other', date: validDate(i.date) ? i.date : dateKeyIn(i.start, s.settings.homeTz), time: /^\d{2}:\d{2}$/.test(i.time || '') ? i.time : '09:00' }));
+  s.unavail = (Array.isArray(s.unavail) ? s.unavail : []).filter(okEv).map(u => Object.assign({}, u, { tz: validTz(u.tz) ? u.tz : s.settings.homeTz, date: validDate(u.date) ? u.date : dateKeyIn(u.start, s.settings.homeTz), until: validDate(u.until) ? u.until : '', allDay: !!u.allDay, startTime: /^\d{2}:\d{2}$/.test(u.startTime || '') ? u.startTime : '09:00', endTime: /^\d{2}:\d{2}$/.test(u.endTime || '') ? u.endTime : '17:00' }));
   if (!Array.isArray(p.skills)) p.skills = [];
   if (!Array.isArray(p.arrangements)) p.arrangements = [];
   if (!LEVELS[p.level]) p.level = 'mid';
@@ -565,10 +577,482 @@ async function autofill(form) {
   } finally { btn.disabled = false; btn.removeAttribute('aria-busy'); }
 }
 
+/* ============ Theme ============ */
+const prefersDark = () => !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+const isDark = () => state.settings.theme === 'dark' || (state.settings.theme === 'system' && prefersDark());
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', isDark() ? 'dark' : 'light');
+  const b = document.querySelector('[data-action="toggle-theme"]');
+  if (b) { b.setAttribute('aria-pressed', String(isDark())); b.querySelector('.theme-label').textContent = isDark() ? 'Light' : 'Dark'; }
+  const m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute('content', isDark() ? '#0e151b' : '#0f766e');
+}
+
+/* ============ Time zones (no libraries; DST-safe) ============ */
+const COMMON_TZ = [['Europe/London', 'London (UK)'], ['Europe/Madrid', 'Madrid (Spain)'], ['Europe/Dublin', 'Dublin (Ireland)'], ['Europe/Paris', 'Paris (France)'], ['Europe/Berlin', 'Berlin (Germany)'], ['Europe/Lisbon', 'Lisbon (Portugal)'], ['UTC', 'UTC'],
+  ['America/New_York', 'New York (US East)'], ['America/Chicago', 'Chicago (US Central)'], ['America/Denver', 'Denver (US Mountain)'], ['America/Los_Angeles', 'Los Angeles (US West)'], ['America/Toronto', 'Toronto (Canada)'], ['America/Sao_Paulo', 'São Paulo (Brazil)'],
+  ['Asia/Dubai', 'Dubai (UAE)'], ['Asia/Kolkata', 'India'], ['Asia/Singapore', 'Singapore'], ['Asia/Tokyo', 'Tokyo (Japan)'], ['Australia/Sydney', 'Sydney (Australia)'], ['Pacific/Auckland', 'Auckland (New Zealand)']];
+const TZ_NAMES = Object.fromEntries(COMMON_TZ);
+const validTz = tz => { if (typeof tz !== 'string' || !tz || tz.length > 60) return false; try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch (e) { return false; } };
+function browserTz() { try { const z = Intl.DateTimeFormat().resolvedOptions().timeZone; return validTz(z) ? z : 'Europe/London'; } catch (e) { return 'Europe/London'; } }
+const tzCity = tz => TZ_NAMES[tz] || String(tz).split('/').pop().replace(/_/g, ' ');
+function offsetLabel(tz, ms) {
+  try { const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' }).formatToParts(ms == null ? Date.now() : ms).find(x => x.type === 'timeZoneName'); return p ? p.value : ''; } catch (e) { return ''; }
+}
+const dtfCache = {};
+function partsIn(ms, tz) {
+  const f = dtfCache[tz] || (dtfCache[tz] = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  const o = {}; f.formatToParts(ms).forEach(p => { if (p.type !== 'literal') o[p.type] = Number(p.value); });
+  if (o.hour === 24) o.hour = 0;
+  return o;
+}
+const offsetMs = (ms, tz) => { const p = partsIn(ms, tz); return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000; };
+/* Wall-clock time in a zone -> UTC milliseconds. Returns null if that time does not exist (clocks jump forward). */
+function zonedToUtc(date, time, tz, lenient) {
+  const [y, m, d] = parts(date), [h, mi] = String(time).split(':').map(Number);
+  const guess = Date.UTC(y, m - 1, d, h, mi);
+  const u1 = guess - offsetMs(guess, tz);
+  const utc = guess - offsetMs(u1, tz);
+  const p = partsIn(utc, tz);
+  if (p.year !== y || p.month !== m || p.day !== d || p.hour !== h || p.minute !== mi) return lenient ? utc : null;
+  return utc;
+}
+const dateKeyIn = (ms, tz) => { const p = partsIn(ms, tz); return `${p.year}-${pad(p.month)}-${pad(p.day)}`; };
+const todayIn = tz => dateKeyIn(Date.now(), tz);
+const wallMin = (ms, tz) => { const p = partsIn(ms, tz); return p.hour * 60 + p.minute; };
+const fmtT = (ms, tz) => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZone: tz });
+const fmtD = (ms, tz) => new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: tz });
+const fmtWhen = (ms, tz) => `${fmtD(ms, tz)}, ${fmtT(ms, tz)}`;
+const fmtStr = (s, o) => { const [y, m, d] = parts(s); return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', Object.assign({ timeZone: 'UTC' }, o)); };
+const wallSerial = (ms, tz) => { const p = partsIn(ms, tz); return (Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Date.UTC(1899, 11, 30)) / 864e5; };
+const wallText = (ms, tz) => { const p = partsIn(ms, tz); return `${p.year}-${pad(p.month)}-${pad(p.day)} ${pad(p.hour)}:${pad(p.minute)}`; };
+const monday = s => { const [y, m, d] = parts(s); const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); return addDays(s, -((dow + 6) % 7)); };
+const addMonths = (s, n) => { const [y, m] = parts(s); return ymd(new Date(y, m - 1 + n, 1)); };
+
+function tzSelect(id, name, value, extra) {
+  const common = new Set(COMMON_TZ.map(z => z[0]));
+  let all = [];
+  try { all = (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : []).filter(z => !common.has(z)); } catch (e) { all = []; }
+  const now = Date.now();
+  const opt = (z, text) => `<option value="${esc(z)}" ${z === value ? 'selected' : ''}>${esc(text)} · ${esc(offsetLabel(z, now))}</option>`;
+  const inList = common.has(value) || all.includes(value);
+  return `<select id="${id}" name="${name}" ${extra || ''}>${inList ? '' : opt(value, value)}<optgroup label="Common">${COMMON_TZ.map(z => opt(z[0], z[1])).join('')}</optgroup>${all.length ? `<optgroup label="All time zones">${all.map(z => opt(z, z.replace(/_/g, ' '))).join('')}</optgroup>` : ''}</select>`;
+}
+
+/* ============ Calendar data ============ */
+const IV_TYPES = ['Phone screen', 'Video call', 'On-site', 'Assessment / task', 'Final round', 'Other'];
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+const ivNames = iv => { const j = iv.jobId && getJob(iv.jobId); return { company: j ? j.company : (iv.company || 'Interview'), title: j ? j.title : (iv.title || '') }; };
+const calItems = () => state.interviews.map(o => ({ kind: 'iv', id: o.id, start: o.start, end: o.end, o })).concat(state.unavail.map(o => ({ kind: 'un', id: o.id, start: o.start, end: o.end, o })));
+const itemText = it => it.kind === 'iv' ? `Interview: ${ivNames(it.o).company}${ivNames(it.o).title ? ' (' + ivNames(it.o).title + ')' : ''}` : `Unavailable${it.o.label ? ': ' + it.o.label : ''}`;
+
+function conflictsFor(start, end, ignoreId) {
+  return calItems().filter(it => it.id !== ignoreId && overlaps(it, { start, end }));
+}
+function slotInfo(v) {
+  if (!validDate(v.date) || !/^\d{2}:\d{2}$/.test(v.time || '')) return { error: 'Choose a date and a time.' };
+  if (!validTz(v.tz)) return { error: 'Choose a time zone.' };
+  const dur = Number(v.dur);
+  if (!(dur >= 5 && dur <= 720)) return { error: 'Choose how long it lasts.' };
+  const start = zonedToUtc(v.date, v.time, v.tz);
+  if (start == null) return { error: "That time doesn't exist in this time zone (the clocks change that day). Pick a different time." };
+  const end = start + dur * 60000;
+  return { start, end, conflicts: conflictsFor(start, end, v.ignoreId) };
+}
+function previewHtml(info, enteredTz, kindWord) {
+  if (info.error) return `<p class="muted">${esc(info.error)}</p>`;
+  const zs = [enteredTz, state.settings.homeTz, state.settings.altTz].filter((z, i, a) => z && a.indexOf(z) === i);
+  const rows = zs.map(z => `<li><span class="zn">${esc(tzCity(z))} <span class="muted">${esc(offsetLabel(z, info.start))}${z === state.settings.homeTz ? ' · your time' : ''}</span></span><strong>${esc(fmtD(info.start, z))}, ${esc(fmtT(info.start, z))}–${esc(fmtT(info.end, z))}</strong></li>`).join('');
+  const bad = info.conflicts.length;
+  const status = bad
+    ? `<p class="prev-status bad" role="alert"><strong>Conflict:</strong> ${esc(info.conflicts.map(itemText).join('; '))}.</p>`
+    : `<p class="prev-status ok"><strong>You're free</strong> at this time.</p>`;
+  const past = info.start < Date.now() ? '<p class="hint">This time is in the past.</p>' : '';
+  return `${status}<ul class="zones">${rows}</ul>${past}`;
+}
+
+/* ============ Calendar view ============ */
+const HOUR_PX = 48;
+const hourLabel = h => new Date(Date.UTC(2000, 0, 1, h)).toLocaleTimeString(undefined, { hour: 'numeric', timeZone: 'UTC' });
+const isNarrow = () => !!(window.matchMedia && window.matchMedia('(max-width:760px)').matches);
+
+function calRange() {
+  const c = ui.cal;
+  if (c.view === 'day') return [c.date];
+  if (c.view === 'week') { const m = monday(c.date); return [0, 1, 2, 3, 4, 5, 6].map(i => addDays(m, i)); }
+  return null;
+}
+function calTitle() {
+  const c = ui.cal;
+  if (c.view === 'day') return fmtStr(c.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  if (c.view === 'week') { const m = monday(c.date), e = addDays(m, 6); return `${fmtStr(m, { day: 'numeric', month: 'short' })} – ${fmtStr(e, { day: 'numeric', month: 'short', year: 'numeric' })}`; }
+  return fmtStr(c.date, { month: 'long', year: 'numeric' });
+}
+function dayBounds(d, tz) { return [zonedToUtc(d, '00:00', tz, true), zonedToUtc(addDays(d, 1), '00:00', tz, true)]; }
+function itemsOnDay(d, tz) { const [s, e] = dayBounds(d, tz); return calItems().filter(it => it.start < e && it.end > s).sort((a, b) => a.start - b.start || a.end - b.end); }
+
+function blockHtml(sg, tz) {
+  const it = sg.it, un = it.kind === 'un';
+  const top = sg.a / 60 * HOUR_PX, h = Math.max(24, (sg.b - sg.a) / 60 * HOUR_PX - 2);
+  const left = sg.col / sg.cols * 100, w = 100 / sg.cols;
+  const n = ivNames(it.o);
+  const range = `${fmtT(it.start, tz)}–${fmtT(it.end, tz)}`;
+  const inner = un
+    ? `<strong>Unavailable</strong>${it.o.label ? `<span> · ${esc(it.o.label)}</span>` : ''}${h >= 40 ? `<small>${esc(range)}</small>` : ''}`
+    : `<strong>${esc(n.company)}</strong>${h >= 40 ? `<small>${esc(fmtT(it.start, tz))}${n.title ? ' · ' + esc(n.title) : ''}</small>` : ''}`;
+  return `<button type="button" class="blk ${un ? 'un' : 'iv'}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" data-action="cal-open" data-kind="${it.kind}" data-id="${esc(it.id)}" aria-label="${esc(itemText(it) + ', ' + range)}">${inner}</button>`;
+}
+function layoutSegs(segs) {
+  segs.sort((x, y) => x.a - y.a || y.b - x.b);
+  let cluster = [], clusterEnd = -1;
+  const flush = () => { const n = cluster.reduce((m, s) => Math.max(m, s.col + 1), 1); cluster.forEach(s => { s.cols = n; }); cluster = []; };
+  segs.forEach(sg => {
+    if (sg.a >= clusterEnd) { flush(); clusterEnd = -1; }
+    const used = cluster.filter(o => o.b > sg.a).map(o => o.col);
+    let col = 0; while (used.includes(col)) col++;
+    sg.col = col; cluster.push(sg); clusterEnd = Math.max(clusterEnd, sg.b);
+  });
+  flush();
+  return segs;
+}
+function gridView(days, tz) {
+  const nowMs = Date.now(), tdy = todayIn(tz);
+  const heads = days.map(d => `<button type="button" class="tg-dh ${d === tdy ? 'today' : ''}" data-action="cal-day" data-date="${d}" ${d === tdy ? 'aria-current="date"' : ''}><span>${esc(fmtStr(d, { weekday: 'short' }))}</span><strong>${esc(fmtStr(d, { day: 'numeric', month: 'short' }))}</strong></button>`).join('');
+  let firstMin = null;
+  const cols = days.map(d => {
+    const [s, e] = dayBounds(d, tz);
+    const segs = itemsOnDay(d, tz).map(it => {
+      let a = it.start <= s ? 0 : wallMin(it.start, tz);
+      let b = it.end >= e ? 1440 : wallMin(it.end, tz);
+      if (b <= a) b = Math.min(1440, a + 15);
+      return { it, a, b };
+    });
+    layoutSegs(segs);
+    segs.forEach(sg => { if (firstMin == null || sg.a < firstMin) firstMin = sg.a; });
+    const slots = Array.from({ length: 24 }, (_, h) => `<div class="slot" style="top:${h * HOUR_PX}px" data-action="cal-slot" data-date="${d}" data-hour="${h}"></div>`).join('');
+    const now = d === tdy ? `<div class="nowline" style="top:${wallMin(nowMs, tz) / 60 * HOUR_PX}px" aria-hidden="true"></div>` : '';
+    return `<div class="tg-col ${d === tdy ? 'today' : ''}" role="group" aria-label="${esc(fmtStr(d, { weekday: 'long', day: 'numeric', month: 'long' }))}">${slots}${segs.map(sg => blockHtml(sg, tz)).join('')}${now}</div>`;
+  }).join('');
+  const hours = `<div class="tg-hours" aria-hidden="true">${Array.from({ length: 24 }, (_, h) => `<div style="top:${h * HOUR_PX}px">${h === 0 ? '' : esc(hourLabel(h))}</div>`).join('')}</div>`;
+  ui.calScrollTo = Math.max(0, ((firstMin != null ? firstMin : 8 * 60) / 60 - 1) * HOUR_PX);
+  return `<div class="tg-scroll" tabindex="0" role="region" aria-label="Calendar, scroll for other hours"><div class="tg" style="--cols:${days.length}"><div class="tg-head"><div class="tg-corner"></div>${heads}</div><div class="tg-body">${hours}${cols}</div></div></div>`;
+}
+function weekAgenda(days, tz) {
+  const tdy = todayIn(tz);
+  return `<div class="agenda">${days.map(d => {
+    const its = itemsOnDay(d, tz);
+    return `<section class="card agenda-day ${d === tdy ? 'today' : ''}"><h3><button type="button" class="link-btn" data-action="cal-day" data-date="${d}">${esc(fmtStr(d, { weekday: 'long', day: 'numeric', month: 'short' }))}</button>${d === tdy ? ' <span class="badge today">Today</span>' : ''}</h3>
+      ${its.length ? `<ul>${its.map(it => `<li><button type="button" class="ag-item ${it.kind}" data-action="cal-open" data-kind="${it.kind}" data-id="${esc(it.id)}"><span class="ag-time">${esc(fmtT(it.start, tz))}<small>${esc(fmtT(it.end, tz))}</small></span><span class="ag-text"><strong>${esc(it.kind === 'un' ? 'Unavailable' : ivNames(it.o).company)}</strong><span class="muted">${esc(it.kind === 'un' ? (it.o.label || '') : ivNames(it.o).title)}</span></span></button></li>`).join('')}</ul>` : '<p class="muted">Nothing scheduled. You are free.</p>'}</section>`;
+  }).join('')}</div>`;
+}
+function monthView(tz) {
+  const c = ui.cal, [y, m] = parts(c.date);
+  const first = `${y}-${pad(m)}-01`, start = monday(first), tdy = todayIn(tz);
+  const nWeeks = Math.ceil(((new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 6) % 7 + new Date(Date.UTC(y, m, 0)).getUTCDate()) / 7);
+  const names = [0, 1, 2, 3, 4, 5, 6].map(i => `<div class="mh">${esc(fmtStr(addDays(start, i), { weekday: 'short' }))}</div>`).join('');
+  const cells = [];
+  for (let i = 0; i < nWeeks * 7; i++) {
+    const d = addDays(start, i), its = itemsOnDay(d, tz), inMonth = parts(d)[1] === m;
+    const ivs = its.filter(x => x.kind === 'iv').length, uns = its.filter(x => x.kind === 'un').length;
+    const chips = its.slice(0, 2).map(it => `<span class="mchip ${it.kind}">${it.kind === 'iv' ? `<b>${esc(fmtT(it.start, tz))}</b> ${esc(ivNames(it.o).company)}` : 'Unavailable'}</span>`).join('') + (its.length > 2 ? `<span class="mmore">+${its.length - 2} more</span>` : '');
+    const label = `${fmtStr(d, { weekday: 'long', day: 'numeric', month: 'long' })}${ivs ? `, ${plural(ivs, 'interview')}` : ''}${uns ? `, ${uns} unavailable` : ''}`;
+    cells.push(`<button type="button" class="mcell ${inMonth ? '' : 'out'} ${d === tdy ? 'today' : ''}" data-action="cal-day" data-date="${d}" aria-label="${esc(label)}"><span class="mnum">${parts(d)[2]}</span><span class="mchips">${chips}</span></button>`);
+  }
+  return `<div class="month"><div class="mgrid mhead">${names}</div><div class="mgrid">${cells.join('')}</div></div>`;
+}
+function viewCalendar() {
+  const s = state.settings, tz = s.homeTz, c = ui.cal;
+  if (!validDate(c.date)) c.date = todayIn(tz);
+  const days = calRange();
+  const body = c.view === 'month' ? monthView(tz) : (c.view === 'week' && isNarrow() ? weekAgenda(days, tz) : gridView(days, tz));
+  const nxt = state.interviews.filter(i => i.end > Date.now()).length;
+  const unit = { day: 'day', week: 'week', month: 'month' }[c.view];
+  return `<div class="page cal">
+    <div class="page-head"><div><h1>Interviews Calendar</h1><p class="muted">Times are shown in <strong>${esc(tzCity(tz))}</strong> (${esc(offsetLabel(tz))}). ${nxt ? plural(nxt, 'upcoming interview') + '.' : 'No upcoming interviews yet.'}</p></div>
+      <div class="actions-row"><button class="btn primary" type="button" data-action="iv-new">Add interview</button><button class="btn" type="button" data-action="un-new">Block time</button><button class="btn" type="button" data-action="chk-open">Check a time</button></div></div>
+    <div class="cal-bar">
+      <div class="cal-nav"><button class="btn" type="button" data-action="cal-nav" data-dir="-1" aria-label="Previous ${unit}">‹</button><button class="btn" type="button" data-action="cal-today">Today</button><button class="btn" type="button" data-action="cal-nav" data-dir="1" aria-label="Next ${unit}">›</button></div>
+      <h2 class="cal-title" aria-live="polite">${esc(calTitle())}</h2>
+      <div class="filter-group" role="group" aria-label="Calendar view">${['day', 'week', 'month'].map(v => `<button class="pill" type="button" aria-pressed="${c.view === v}" data-action="cal-view" data-value="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+    </div>
+    <div class="cal-tz">
+      <div class="field"><label for="cal-home">My time zone</label>${tzSelect('cal-home', 'homeTz', s.homeTz, 'data-change="home-tz"')}</div>
+      <div class="field"><label for="cal-alt">Also show</label>${tzSelect('cal-alt', 'altTz', s.altTz, 'data-change="alt-tz"')}</div>
+    </div>
+    <p class="legend"><span class="sw iv"></span> Interview <span class="sw un"></span> Unavailable <span class="hint">· tap an empty time to add something there</span></p>
+    ${body}
+  </div>`;
+}
+
+/* ============ Calendar forms ============ */
+const durOptions = (cur) => [15, 30, 45, 60, 90, 120, 180].concat([15, 30, 45, 60, 90, 120, 180].includes(cur) ? [] : [cur]).sort((a, b) => a - b).map(m => [String(m), m >= 60 && m % 60 === 0 ? `${m / 60} hour${m > 60 ? 's' : ''}` : `${m} minutes`]);
+const nextHour = tz => { const p = partsIn(Date.now() + 3600000, tz); return `${pad(p.hour)}:00`; };
+
+function openIvForm(o = {}) {
+  const s = state.settings, iv = o.id ? state.interviews.find(x => x.id === o.id) : null;
+  const v = iv || { jobId: '', company: '', title: '', type: 'Video call', date: o.date || todayIn(s.homeTz), time: o.time || nextHour(s.homeTz), tz: o.tz || s.homeTz, dur: 60, link: '', notes: '' };
+  const jobs = state.jobs.filter(j => j.status !== 'passed' || j.id === v.jobId);
+  const body = `
+    <div class="field"><label for="iv-jobId">Which job is this for?</label>
+      <select id="iv-jobId" name="jobId"><option value="">Not in my list (type it below)</option>${jobs.map(j => `<option value="${esc(j.id)}" ${j.id === v.jobId ? 'selected' : ''}>${esc(j.title)} · ${esc(j.company)}</option>`).join('')}</select></div>
+    <div data-manual ${v.jobId ? 'hidden' : ''}>
+      ${field({ p: 'iv', name: 'company', label: 'Company', value: v.company || '', max: 120, required: true })}
+      ${field({ p: 'iv', name: 'title', label: 'Role', value: v.title || '', max: 120 })}
+    </div>
+    <div class="two">
+      ${field({ p: 'iv', name: 'date', label: 'Date', type: 'date', value: v.date, required: true })}
+      ${field({ p: 'iv', name: 'time', label: 'Time', type: 'time', value: v.time, required: true })}
+    </div>
+    <div class="field"><label for="iv-tz">Time zone of the time above</label>${tzSelect('iv-tz', 'tz', v.tz)}<p class="hint">For example, enter 16:00 and choose London (UK) if the employer gave you a UK time. The conversions appear below.</p><p class="error" data-err="tz" hidden></p></div>
+    <div class="two">
+      ${field({ p: 'iv', name: 'dur', label: 'Length', type: 'select', value: String(v.dur), required: true, options: durOptions(v.dur) })}
+      ${field({ p: 'iv', name: 'type', label: 'Type', type: 'select', value: v.type, required: true, options: IV_TYPES.map(t => [t, t]) })}
+    </div>
+    <div id="cal-preview" class="preview" aria-live="polite"></div>
+    ${field({ p: 'iv', name: 'link', label: 'Meeting link or address', type: 'url', value: v.link || '', ph: 'https://…', hint: 'For a video link. For an address, put it in the notes.' })}
+    ${field({ p: 'iv', name: 'notes', label: 'Notes', type: 'textarea', value: v.notes || '', max: 2000, ph: 'Interviewer names, what to prepare…' })}`;
+  const foot = (iv ? `<div class="confirm-zone" data-zone="iv-del"><button class="btn danger" type="button" data-action="iv-del-ask">Delete interview</button></div>` : '<span></span>')
+    + `<div class="grp"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">${iv ? 'Save changes' : 'Add interview'}</button></div>`;
+  openDlg(dlg.cal, shell(iv ? 'Edit interview' : 'Add an interview', 'Enter the time in any time zone; it is converted for you.', body, foot, `data-form="iv" ${iv ? `data-id="${esc(iv.id)}"` : ''}`), iv ? 'Edit interview' : 'Add an interview');
+  calPreview($('#calDialog form'));
+}
+function openUnForm(o = {}) {
+  const s = state.settings, un = o.id ? state.unavail.find(x => x.id === o.id) : null;
+  const v = un || { label: '', date: o.date || todayIn(s.homeTz), until: '', allDay: false, startTime: o.time || '09:00', endTime: o.time ? pad((Number(o.time.slice(0, 2)) + 1) % 24) + ':00' : '17:00', tz: s.homeTz };
+  const body = `
+    <p class="notice" style="margin-bottom:16px">Block times when you can't take a call (work, travel, holidays). They show hatched on the calendar and warn you if an interview is offered then.</p>
+    ${field({ p: 'un', name: 'label', label: 'What is it?', value: v.label || '', max: 80, ph: 'Day job, travel, appointment…' })}
+    <div class="two">
+      ${field({ p: 'un', name: 'date', label: 'From date', type: 'date', value: v.date, required: true })}
+      ${field({ p: 'un', name: 'until', label: 'Until date (several days)', type: 'date', value: v.until || '' })}
+    </div>
+    <label class="check-line"><input type="checkbox" name="allDay" ${v.allDay ? 'checked' : ''}> All day</label>
+    <div class="two" data-times ${v.allDay ? 'hidden' : ''}>
+      ${field({ p: 'un', name: 'startTime', label: 'Start time', type: 'time', value: v.startTime, required: true })}
+      ${field({ p: 'un', name: 'endTime', label: 'End time', type: 'time', value: v.endTime, required: true })}
+    </div>
+    <div class="field"><label for="un-tz">Time zone</label>${tzSelect('un-tz', 'tz', v.tz)}<p class="error" data-err="tz" hidden></p></div>
+    <div id="cal-preview" class="preview" aria-live="polite"></div>`;
+  const foot = (un ? `<div class="confirm-zone" data-zone="un-del"><button class="btn danger" type="button" data-action="un-del-ask">Delete block</button></div>` : '<span></span>')
+    + `<div class="grp"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">${un ? 'Save changes' : 'Block this time'}</button></div>`;
+  openDlg(dlg.cal, shell(un ? 'Edit unavailable time' : 'Mark time as unavailable', '', body, foot, `data-form="un" ${un ? `data-id="${esc(un.id)}"` : ''}`), un ? 'Edit unavailable time' : 'Mark time as unavailable');
+  calPreview($('#calDialog form'));
+}
+function openChecker(o = {}) {
+  const s = state.settings;
+  const body = `
+    <p class="notice" style="margin-bottom:16px">An employer offered a time? Type it here to see whether you're free and what it is in your time.</p>
+    <div class="two">
+      ${field({ p: 'ck', name: 'date', label: 'Date', type: 'date', value: o.date || todayIn(s.homeTz), required: true })}
+      ${field({ p: 'ck', name: 'time', label: 'Time', type: 'time', value: o.time || nextHour(s.homeTz), required: true })}
+    </div>
+    <div class="field"><label for="ck-tz">Time zone of the time above</label>${tzSelect('ck-tz', 'tz', o.tz || s.homeTz)}</div>
+    ${field({ p: 'ck', name: 'dur', label: 'Length', type: 'select', value: '60', required: true, options: durOptions(60) })}
+    <div id="cal-preview" class="preview" aria-live="polite"></div>`;
+  const foot = `<div class="grp"><button class="btn" type="button" data-action="chk-add-iv">Add interview at this time</button><button class="btn" type="button" data-action="chk-add-un">Block this time</button></div><button class="btn primary" type="button" data-action="close-dialog">Done</button>`;
+  openDlg(dlg.cal, shell('Check a time', 'Am I free?', body, foot, 'data-form="chk"'), 'Check a time');
+  calPreview($('#calDialog form'));
+}
+function openChooser(date, hour) {
+  const time = `${pad(hour)}:00`;
+  openDlg(dlg.cal, panel('Add to calendar', `${fmtStr(date, { weekday: 'long', day: 'numeric', month: 'long' })} at ${time}`, '<p>What would you like to add at this time?</p>',
+    `<button class="btn primary" type="button" data-action="iv-new" data-date="${date}" data-time="${time}">Add interview</button><button class="btn" type="button" data-action="un-new" data-date="${date}" data-time="${time}">Block as unavailable</button><button class="btn" type="button" data-action="close-dialog">Cancel</button>`), 'Add to calendar');
+}
+
+function formVals(form) {
+  const f = new FormData(form), g = k => (f.get(k) || '').toString().trim();
+  return { f, g };
+}
+function unTimes(v) {
+  if (!validDate(v.date)) return { error: 'Choose the start date.' };
+  if (v.until && !validDate(v.until)) return { error: 'Choose a valid end date.' };
+  if (v.until && v.until < v.date) return { error: "The end date can't be before the start date." };
+  if (!validTz(v.tz)) return { error: 'Choose a time zone.' };
+  let start, end;
+  if (v.allDay) {
+    start = zonedToUtc(v.date, '00:00', v.tz, true); end = zonedToUtc(addDays(v.until || v.date, 1), '00:00', v.tz, true);
+  } else {
+    if (!/^\d{2}:\d{2}$/.test(v.startTime) || !/^\d{2}:\d{2}$/.test(v.endTime)) return { error: 'Choose a start and end time.' };
+    start = zonedToUtc(v.date, v.startTime, v.tz);
+    end = zonedToUtc(v.until || v.date, v.endTime, v.tz);
+    if (start == null || end == null) return { error: "One of those times doesn't exist in this time zone (the clocks change that day)." };
+    if (end <= start) { if (v.until) return { error: 'The end must be after the start.' }; end = zonedToUtc(addDays(v.date, 1), v.endTime, v.tz); if (end == null) return { error: "That end time doesn't exist (the clocks change that day)." }; v.nextDay = true; }
+  }
+  return { start, end, nextDay: !!v.nextDay };
+}
+function calPreview(form) {
+  const box = $('#cal-preview'); if (!form || !box) return;
+  const { f, g } = formVals(form), kind = form.dataset.form;
+  if (kind === 'un') {
+    const t = unTimes({ date: g('date'), until: g('until'), allDay: f.has('allDay'), startTime: g('startTime'), endTime: g('endTime'), tz: g('tz') });
+    if (t.error) { box.innerHTML = `<p class="muted">${esc(t.error)}</p>`; return; }
+    const cf = conflictsFor(t.start, t.end, form.dataset.id).filter(x => x.kind === 'iv');
+    const hz = state.settings.homeTz;
+    box.innerHTML = `${cf.length ? `<p class="prev-status bad" role="alert"><strong>Heads up:</strong> you already have ${esc(cf.map(itemText).join('; '))} in this time.</p>` : ''}<ul class="zones"><li><span class="zn">${esc(tzCity(hz))} <span class="muted">· your time</span></span><strong>${esc(fmtWhen(t.start, hz))} → ${esc(fmtWhen(t.end, hz))}</strong></li></ul>${t.nextDay ? '<p class="hint">The end time is earlier than the start, so this ends the next day.</p>' : ''}`;
+    return;
+  }
+  const info = slotInfo({ date: g('date'), time: g('time'), tz: g('tz'), dur: g('dur'), ignoreId: form.dataset.id });
+  box.innerHTML = previewHtml(info, g('tz'));
+}
+
+function saveIv(form) {
+  const { g } = formVals(form), errs = {};
+  const id = form.dataset.id, jobId = g('jobId'), job = jobId ? getJob(jobId) : null;
+  const v = { jobId: job ? jobId : '', company: g('company'), title: g('title'), type: g('type'), date: g('date'), time: g('time'), tz: g('tz'), dur: Number(g('dur')), link: g('link'), notes: g('notes') };
+  if (!job && !v.company) errs.company = 'Enter the company, or choose a job from your list.';
+  if (!validDate(v.date)) errs.date = 'Choose a date.';
+  if (!/^\d{2}:\d{2}$/.test(v.time)) errs.time = 'Choose a time.';
+  if (!validTz(v.tz)) errs.tz = 'Choose a time zone.';
+  if (!IV_TYPES.includes(v.type)) errs.type = 'Choose a type.';
+  if (!(v.dur >= 5 && v.dur <= 720)) errs.dur = 'Choose how long it lasts.';
+  if (v.link && !validUrl(v.link)) errs.link = 'Enter a full link that starts with http:// or https://.';
+  let start = null;
+  if (!errs.date && !errs.time && !errs.tz) { start = zonedToUtc(v.date, v.time, v.tz); if (start == null) errs.time = "That time doesn't exist in this time zone (the clocks change that day). Pick a different time."; }
+  if (!showErrors(form, errs)) return;
+  const rec = Object.assign({}, v, { start, end: start + v.dur * 60000 });
+  if (job) { rec.company = ''; rec.title = ''; }
+  let iv;
+  if (id) { iv = state.interviews.find(x => x.id === id); Object.assign(iv, rec); } else { iv = Object.assign({ id: uid() }, rec); state.interviews.push(iv); }
+  const n = ivNames(iv);
+  log(`${id ? 'Updated' : 'Scheduled'} interview with ${n.company} for ${fmtWhen(iv.start, state.settings.homeTz)}`);
+  ui.cal.date = dateKeyIn(iv.start, state.settings.homeTz);
+  dlg.cal.close(); commit();
+  const app = job && appForJob(job.id);
+  if (!id && app && app.stage === 'Applied') {
+    toast(`Interview added for ${fmtWhen(iv.start, state.settings.homeTz)}. Move this application to Interviewing?`, { label: 'Move', fn: () => { app.stage = 'Interviewing'; log(`Moved ${job.company} to Interviewing`); commit(); toast('Moved to Interviewing.'); } });
+  } else toast(id ? 'Interview updated.' : `Interview added for ${fmtWhen(iv.start, state.settings.homeTz)}.`);
+}
+function saveUn(form) {
+  const { f, g } = formVals(form), errs = {};
+  const id = form.dataset.id;
+  const v = { label: g('label'), date: g('date'), until: g('until'), allDay: f.has('allDay'), startTime: g('startTime') || '09:00', endTime: g('endTime') || '17:00', tz: g('tz') };
+  if (!validDate(v.date)) errs.date = 'Choose the start date.';
+  if (v.until && (!validDate(v.until) || v.until < v.date)) errs.until = "The end date can't be before the start date.";
+  if (!validTz(v.tz)) errs.tz = 'Choose a time zone.';
+  let t = null;
+  if (!Object.keys(errs).length) {
+    t = unTimes(Object.assign({}, v));
+    if (t.error) { if (/end/i.test(t.error)) errs.endTime = t.error; else errs.startTime = t.error; }
+  }
+  if (!showErrors(form, errs)) return;
+  const rec = Object.assign({}, v, { start: t.start, end: t.end });
+  let un;
+  if (id) { un = state.unavail.find(x => x.id === id); Object.assign(un, rec); } else { un = Object.assign({ id: uid() }, rec); state.unavail.push(un); }
+  log(`${id ? 'Updated' : 'Blocked'} unavailable time: ${un.label || fmtWhen(un.start, state.settings.homeTz)}`);
+  ui.cal.date = dateKeyIn(un.start, state.settings.homeTz);
+  const hit = conflictsFor(un.start, un.end, un.id).filter(x => x.kind === 'iv');
+  dlg.cal.close(); commit();
+  toast(hit.length ? `Saved, but it overlaps ${hit.length === 1 ? 'an interview' : plural(hit.length, 'interview')}. Check your calendar.` : (id ? 'Unavailable time updated.' : 'Time blocked.'));
+}
+
+/* ============ Export: Excel (.xlsx) and CSV ============ */
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const xmlEsc = s => String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_T[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function zipStore(files) {
+  const enc = new TextEncoder(), chunks = [], central = [];
+  const d = new Date(), dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  let offset = 0;
+  files.forEach(f => {
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data), size = data.length;
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true); h.setUint16(10, dosTime, true); h.setUint16(12, dosDate, true);
+    h.setUint32(14, crc, true); h.setUint32(18, size, true); h.setUint32(22, size, true); h.setUint16(26, name.length, true); h.setUint16(28, 0, true);
+    chunks.push(new Uint8Array(h.buffer), name, data);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true); c.setUint16(12, dosTime, true); c.setUint16(14, dosDate, true);
+    c.setUint32(16, crc, true); c.setUint32(20, size, true); c.setUint32(24, size, true); c.setUint16(28, name.length, true); c.setUint32(42, offset, true);
+    central.push(new Uint8Array(c.buffer), name);
+    offset += 30 + name.length + size;
+  });
+  const cdSize = central.reduce((n, a) => n + a.length, 0);
+  const e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, cdSize, true); e.setUint32(16, offset, true);
+  return new Blob([...chunks, ...central, new Uint8Array(e.buffer)], { type: XLSX_MIME });
+}
+const colName = i => { let s = '', n = i + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+const serialOf = s => { const [y, m, d] = parts(s); return (Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 864e5; };
+/* cell values: string | number | {date:'YYYY-MM-DD'} | {dt:serial} | null */
+function cellXml(ref, v, col) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') return Number.isFinite(v) ? `<c r="${ref}"${col.money ? ' s="5"' : ''}><v>${v}</v></c>` : '';
+  if (typeof v === 'object' && v.date) return validDate(v.date) ? `<c r="${ref}" s="2"><v>${serialOf(v.date)}</v></c>` : '';
+  if (typeof v === 'object' && v.dt != null) return `<c r="${ref}" s="3"><v>${v.dt}</v></c>`;
+  return `<c r="${ref}" s="${col.wrap ? 4 : 0}" t="inlineStr"><is><t xml:space="preserve">${xmlEsc(String(v).slice(0, 32000))}</t></is></c>`;
+}
+function sheetXml(sh) {
+  const n = sh.rows.length + 1, last = colName(sh.columns.length - 1);
+  const head = sh.columns.map((c, i) => `<c r="${colName(i)}1" s="1" t="inlineStr"><is><t>${xmlEsc(c.header)}</t></is></c>`).join('');
+  const rows = [`<row r="1" ht="30" customHeight="1">${head}</row>`].concat(sh.rows.map((r, ri) => `<row r="${ri + 2}">${r.map((v, ci) => cellXml(colName(ci) + (ri + 2), v, sh.columns[ci])).join('')}</row>`));
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols>${sh.columns.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.width || 16}" customWidth="1"/>`).join('')}</cols><sheetData>${rows.join('')}</sheetData><autoFilter ref="A1:${last}${n}"/></worksheet>`;
+}
+const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="dd\\ mmm\\ yyyy"/><numFmt numFmtId="165" formatCode="dd\\ mmm\\ yyyy\\ hh:mm"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F766E"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left" vertical="top"/></xf><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+function buildXlsx(sheets) {
+  const X = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const files = [
+    { name: '[Content_Types].xml', text: `${X}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>` },
+    { name: '_rels/.rels', text: `${X}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: 'xl/workbook.xml', text: `${X}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${xmlEsc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` },
+    { name: 'xl/_rels/workbook.xml.rels', text: `${X}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { name: 'xl/styles.xml', text: STYLES_XML }
+  ].concat(sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, text: sheetXml(s) })));
+  return zipStore(files);
+}
+function csvCell(v) {
+  if (v == null) return '';
+  if (typeof v === 'object') v = v.date ? v.date : v.csv != null ? v.csv : '';
+  v = String(v);
+  if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; // stop spreadsheet programs treating text as a formula
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+const toCsv = sh => '﻿' + [sh.columns.map(c => csvCell(c.header)).join(',')].concat(sh.rows.map(r => r.map(csvCell).join(','))).join('\r\n') + '\r\n';
+
+/* ---- report data ---- */
+function followState(app) {
+  const t = state.tasks.find(x => x.type === 'followup' && x.appId === app.id && !x.done);
+  if (!appActive(app)) return { date: '', text: app.followUpDate ? `Paused (${app.stage.toLowerCase()})` : '' };
+  if (!t) return { date: '', text: '' };
+  const n = daysBetween(today(), t.dueDate);
+  return { date: t.dueDate, text: n < 0 ? `Overdue by ${plural(-n, 'day')}` : n === 0 ? 'Due today' : `Upcoming (in ${plural(n, 'day')})` };
+}
+function reportSheets() {
+  const hz = state.settings.homeTz, now = Date.now();
+  const dateOrNull = s => (s && validDate(s) ? { date: s } : null);
+  const jobStatus = j => ({ new: 'To review', saved: 'Saved', passed: 'Passed', applied: 'Applied' }[j.status] || j.status);
+  const nextIv = jobId => state.interviews.filter(i => i.jobId === jobId && i.end > now).sort((a, b) => a.start - b.start)[0];
+  const apps = state.applications.slice().sort((a, b) => b.appliedDate.localeCompare(a.appliedDate)).map(a => {
+    const j = getJob(a.jobId) || { title: '', company: '', location: '', arrangement: '', skills: [] };
+    const f = followState(a), iv = nextIv(a.jobId);
+    return [j.title, j.company, dateOrNull(a.appliedDate), a.stage, salaryText(j), j.salaryMin || null, j.salaryMax || null, j.location, j.arrangement, dateOrNull(f.date), f.text,
+      iv ? { dt: wallSerial(iv.start, hz), csv: wallText(iv.start, hz) } : null, a.contactName + (a.contactDetails ? ` (${a.contactDetails})` : ''), j.ai ? j.ai.score : null, a.notes, a.url || j.url || ''];
+  });
+  const sheets = [];
+  sheets.push({ name: 'Applications', columns: [
+    { header: 'Job Title', width: 32 }, { header: 'Company', width: 26 }, { header: 'Application Date', width: 17 }, { header: 'Selection Process Stage', width: 22 },
+    { header: 'Salary', width: 22 }, { header: 'Salary Min (USD/yr)', width: 17, money: true }, { header: 'Salary Max (USD/yr)', width: 17, money: true },
+    { header: 'Location', width: 30 }, { header: 'Work Style', width: 13 }, { header: 'Pending Follow-up Date', width: 20 }, { header: 'Follow-up Status', width: 22 },
+    { header: `Next Interview (${tzCity(hz)} time)`, width: 24 }, { header: 'Contact', width: 24 }, { header: 'AI Fit Score (1-100)', width: 14 }, { header: 'Notes', width: 46, wrap: true }, { header: 'Listing URL', width: 44 }], rows: apps });
+  sheets.push({ name: 'All jobs', columns: [
+    { header: 'Job Title', width: 32 }, { header: 'Company', width: 26 }, { header: 'Status', width: 12 }, { header: 'Work Style', width: 13 }, { header: 'Location', width: 30 },
+    { header: 'Salary', width: 22 }, { header: 'Experience', width: 14 }, { header: 'Skills', width: 38 }, { header: 'AI Fit Score (1-100)', width: 14 }, { header: 'Date Added', width: 14 }, { header: 'Demo Listing', width: 13 }, { header: 'Listing URL', width: 44 }],
+    rows: state.jobs.map(j => [j.title, j.company, jobStatus(j), j.arrangement, j.location, salaryText(j), expText(j), j.skills.join(', '), j.ai ? j.ai.score : null, dateOrNull(dateKeyIn(Date.parse(j.addedAt) || now, hz)), j.demo ? 'Yes' : 'No', j.url || '']) });
+  sheets.push({ name: 'Interviews', columns: [
+    { header: `Date and Time (${tzCity(hz)})`, width: 24 }, { header: 'Original Time Entered', width: 34 }, { header: 'Length (min)', width: 12 }, { header: 'Company', width: 26 }, { header: 'Role', width: 30 }, { header: 'Type', width: 16 }, { header: 'Link', width: 40 }, { header: 'Notes', width: 40, wrap: true }],
+    rows: state.interviews.slice().sort((a, b) => a.start - b.start).map(i => { const n = ivNames(i); return [{ dt: wallSerial(i.start, hz), csv: wallText(i.start, hz) }, `${i.date} ${i.time} ${tzCity(i.tz)}`, i.dur, n.company, n.title, i.type, i.link || '', i.notes || '']; }) });
+  const t0 = today();
+  sheets.push({ name: 'To-dos', columns: [{ header: 'Task', width: 56 }, { header: 'Due Date', width: 14 }, { header: 'Status', width: 14 }, { header: 'Kind', width: 14 }],
+    rows: state.tasks.slice().sort((a, b) => a.dueDate.localeCompare(b.dueDate)).map(x => [x.title, dateOrNull(x.dueDate), x.done ? 'Done' : x.dueDate < t0 ? 'Overdue' : x.dueDate === t0 ? 'Due today' : 'Upcoming', x.type === 'followup' ? 'Follow-up' : 'Own task']) });
+  return sheets;
+}
+function downloadBlob(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 /* ============ UI state ============ */
-const ui = { aiJobId: null, cvJobId: null, view: 'dashboard', jobStatus: 'review', jobArr: 'all', appStage: 'all', expanded: new Set(), highlight: null, reschedId: null, focus: null };
+const ui = { cal: { view: 'week', date: '' }, calScrollTo: 0, aiJobId: null, cvJobId: null, view: 'dashboard', jobStatus: 'review', jobArr: 'all', appStage: 'all', expanded: new Set(), highlight: null, reschedId: null, focus: null };
 const main = $('#main');
-const dlg = { app: $('#appDialog'), profile: $('#profileDialog'), job: $('#jobDialog'), ai: $('#aiDialog'), cv: $('#cvDialog') };
+const dlg = { app: $('#appDialog'), profile: $('#profileDialog'), job: $('#jobDialog'), ai: $('#aiDialog'), cv: $('#cvDialog'), cal: $('#calDialog') };
 let toastTimer = null, toastAction = null;
 
 function toast(msg, action) {
@@ -604,6 +1088,13 @@ function profileLine() {
 /* ============ Next step ============ */
 function nextStep() {
   const t = today();
+  const soon = state.interviews.filter(i => i.end > Date.now() && i.start < Date.now() + 48 * 3600e3).sort((a, b) => a.start - b.start)[0];
+  if (soon) {
+    const hz = state.settings.homeTz, alt = state.settings.altTz;
+    return { kind: 'interview', title: `Prepare for your interview with ${ivNames(soon).company}`,
+      sub: soon.start <= Date.now() ? 'It is happening now.' : `${fmtWhen(soon.start, hz)} your time${alt !== hz ? ` (${fmtT(soon.start, alt)} in ${tzCity(alt)})` : ''}`,
+      primary: { label: 'Open in calendar', action: 'cal-goto', id: soon.id } };
+  }
   const byDue = (a, b) => a.dueDate.localeCompare(b.dueDate);
   const open = state.tasks.filter(x => !x.done).sort(byDue);
   const fu = open.filter(x => x.type === 'followup' && appActive(getApp(x.appId)));
@@ -700,12 +1191,27 @@ function viewDashboard() {
         <button class="stat" type="button" data-action="go" data-view="applications" data-stage="Interviewing"><strong>${counts.int}</strong><span>Interviews</span></button>
         <button class="stat" type="button" data-action="go" data-view="applications" data-stage="Rejected"><strong>${counts.rej}</strong><span>Rejections</span></button>
       </section>
+      ${ivCard()}
+      ${exportCard()}
       <section class="card g-activity activity" aria-labelledby="act-h"><h2 id="act-h">Recent activity</h2>
         ${state.activity.length ? `<ul>${state.activity.slice(0, 6).map(a => `<li><span>${esc(a.text)}</span><time datetime="${esc(a.at)}">${esc(relTime(a.at))}</time></li>`).join('')}</ul>` : `<div class="empty small"><p>Nothing yet. Save or pass on a job to get started.</p></div>`}
       </section>
     </div>
     <p class="hint">Your data is saved in this browser on this device only. It doesn't sync across devices. Use Profile → Download backup to keep a copy.${storageOk ? '' : ' <strong>Storage is unavailable here, so changes will be lost when you close this tab.</strong>'}</p>
   </div>`;
+}
+function ivCard() {
+  const hz = state.settings.homeTz, alt = state.settings.altTz;
+  const up = state.interviews.filter(i => i.end > Date.now()).sort((a, b) => a.start - b.start).slice(0, 3);
+  return `<section class="card g-iv" aria-labelledby="iv-h"><h2 id="iv-h">Upcoming interviews</h2>
+    ${up.length ? `<ul class="ivlist">${up.map(i => { const n = ivNames(i); return `<li><button class="ivrow" type="button" data-action="cal-goto" data-id="${esc(i.id)}"><strong>${esc(n.company)}${i.demo ? ' <span class="badge demo">Demo</span>' : ''}</strong>${n.title ? `<span class="muted">${esc(n.title)}</span>` : ''}<span>${esc(fmtWhen(i.start, hz))} <span class="muted">· ${esc(tzCity(hz))}</span></span>${alt !== hz ? `<span class="muted">${esc(fmtT(i.start, alt))} in ${esc(tzCity(alt))}</span>` : ''}</button></li>`; }).join('')}</ul>` : '<div class="empty small"><p>No interviews scheduled yet.</p></div>'}
+    <div class="actions-row" style="margin-top:12px"><button class="btn sm" type="button" data-action="go" data-view="calendar">Open calendar</button><button class="btn sm" type="button" data-action="iv-new-go">Add interview</button></div></section>`;
+}
+function exportCard() {
+  return `<section class="card g-export" aria-labelledby="ex-h"><h2 id="ex-h">Download your report</h2>
+    <p class="muted">Every job, application stage, salary, location, pending follow-up and interview in one spreadsheet. Opens in Excel, Numbers and Google Sheets.</p>
+    <div class="actions-row" style="margin-top:12px"><button class="btn primary" type="button" data-action="export-xlsx">Download Excel (.xlsx)</button><button class="btn" type="button" data-action="export-csv">Download CSV</button></div>
+    <p class="hint" style="margin-top:10px">The CSV contains the Applications sheet only. To save everything so you can restore it later, use Profile → Download backup.</p></section>`;
 }
 function dataAttrs(o) {
   return ['id', 'view', 'status', 'stage', 'focus'].filter(k => o[k]).map(k => `data-${k}="${esc(o[k])}"`).join(' ');
@@ -810,8 +1316,9 @@ function viewApps() {
 
 function render() {
   document.querySelectorAll('[data-nav]').forEach(a => { if (a.dataset.nav === ui.view) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  main.innerHTML = ui.view === 'jobs' ? viewJobs() : ui.view === 'applications' ? viewApps() : viewDashboard();
-  document.title = `${{ dashboard: 'Dashboard', jobs: 'Jobs to Review', applications: 'Applications' }[ui.view]} – JobTrail`;
+  main.innerHTML = ui.view === 'jobs' ? viewJobs() : ui.view === 'applications' ? viewApps() : ui.view === 'calendar' ? viewCalendar() : viewDashboard();
+  document.title = `${{ dashboard: 'Dashboard', jobs: 'Jobs to Review', applications: 'Applications', calendar: 'Interviews Calendar' }[ui.view]} – JobTrail`;
+  if (ui.view === 'calendar') { const sc = $('.tg-scroll'); if (sc) sc.scrollTop = ui.calScrollTo || 0; }
   if (ui.highlight) {
     const el = document.getElementById('job-' + ui.highlight);
     if (el) { el.classList.add('flash'); el.scrollIntoView({ block: 'center' }); setTimeout(() => el.classList.remove('flash'), 2500); }
@@ -866,6 +1373,7 @@ function openProfile() {
       <div class="checks" role="group" aria-labelledby="arr-l">${ARR.map(a => `<label><input type="checkbox" name="arrangements" value="${a}" ${p.arrangements.includes(a) ? 'checked' : ''}> ${a}</label>`).join('')}</div>
       <p class="hint">Leave all unchecked if you're open to anything.</p></div>
     ${field({ p: 'pf', name: 'salaryMin', label: 'Minimum salary (USD per year)', type: 'number', value: p.salaryMin ?? '', ph: '75000' })}
+    <div class="field"><label for="pf-theme">Appearance</label><select id="pf-theme" name="theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(o => `<option value="${o[0]}" ${state.settings.theme === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div>
     <div class="section-sep"><h3>Your master CV</h3>
       <p class="hint" style="margin:6px 0 12px">Upload a PDF, Word (.docx) or text file, or paste the text. It is stored only in this browser. PDFs with columns or graphics can come out jumbled, so check the text below.</p>
       <div class="field"><label for="cvFile">Upload your CV</label><input type="file" id="cvFile" accept=".pdf,.docx,.txt,.md"><p class="${state.cv.text ? 'hint' : 'hint'}" id="cv-status" role="status" aria-live="polite">${state.cv.text ? `Saved: ${esc(state.cv.name || 'pasted text')} (${state.cv.text.length.toLocaleString()} characters).` : 'No CV saved yet.'}</p></div>
@@ -891,7 +1399,7 @@ function openProfile() {
     `<button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">Save preferences</button>`, 'data-form="profile"'), 'Your profile');
 }
 function zoneHtml(kind, ask) {
-  const L = { reset: ['Reset to demo data', 'Replace your jobs, applications and tasks with the demo data? Your CV and AI settings are kept.', 'Yes, reset'], clear: ['Start fresh with no jobs', 'Delete all jobs, applications and tasks and start empty? Your CV and AI settings are kept.', 'Yes, delete everything'] }[kind];
+  const L = { reset: ['Reset to demo data', 'Replace your jobs, applications, interviews and tasks with the demo data? Your CV and AI settings are kept.', 'Yes, reset'], clear: ['Start fresh with no jobs', 'Delete all jobs, applications, interviews and tasks and start empty? Your CV and AI settings are kept.', 'Yes, delete everything'] }[kind];
   return ask
     ? `<span class="hint">${L[1]}</span><button class="btn danger solid sm" type="button" data-action="${kind}-confirm">${L[2]}</button><button class="btn sm" type="button" data-action="${kind}-cancel">Cancel</button>`
     : `<button class="btn danger" type="button" data-action="${kind}-ask">${L[0]}</button>`;
@@ -912,7 +1420,8 @@ function saveProfile(form) {
   if (!showErrors(form, errs)) return;
   Object.assign(state.profile, { role, location: loc, level: f.get('level'), skills: splitList(f.get('skills')), arrangements: f.getAll('arrangements'), salaryMin: sal, customized: true });
   if (cvText !== state.cv.text) state.cv = { text: cvText, name: cvText ? (state.cv.name || 'Pasted text') : '', updatedAt: new Date().toISOString() };
-  state.settings = { model, autoAnalyze: f.has('autoAnalyze'), pageReader: f.has('pageReader'), redact: f.has('redact') };
+  Object.assign(state.settings, { model, autoAnalyze: f.has('autoAnalyze'), pageReader: f.has('pageReader'), redact: f.has('redact'), theme: ['system', 'light', 'dark'].includes(f.get('theme')) ? f.get('theme') : 'system' });
+  applyTheme();
   const keyOk = setKey(apiKey);
   log('Updated your job preferences');
   dlg.profile.close(); commit();
@@ -1019,7 +1528,7 @@ function navigate(view) {
 }
 function route() {
   const h = location.hash.slice(1);
-  ui.view = ['dashboard', 'jobs', 'applications'].includes(h) ? h : 'dashboard';
+  ui.view = ['dashboard', 'jobs', 'applications', 'calendar'].includes(h) ? h : 'dashboard';
   render();
 }
 function setStatus(j, to, msg, label) {
@@ -1082,6 +1591,40 @@ const actions = {
     openApp(a.id, 'followUpDate');
   },
   'job-add-open': () => openJobForm(),
+  'toggle-theme': () => { state.settings.theme = isDark() ? 'light' : 'dark'; save(); applyTheme(); },
+  'cal-nav': d => { const n = Number(d.dir), c = ui.cal; c.date = c.view === 'day' ? addDays(c.date, n) : c.view === 'week' ? addDays(c.date, 7 * n) : addMonths(c.date, n); render(); },
+  'cal-today': () => { ui.cal.date = todayIn(state.settings.homeTz); render(); },
+  'cal-view': d => { ui.cal.view = d.value; render(); },
+  'cal-day': d => { ui.cal.date = d.date; ui.cal.view = 'day'; render(); },
+  'cal-goto': d => { const iv = state.interviews.find(x => x.id === d.id); if (!iv) return; ui.cal.date = dateKeyIn(iv.start, state.settings.homeTz); ui.cal.view = 'day'; navigate('calendar'); },
+  'cal-open': d => { if (d.kind === 'un') openUnForm({ id: d.id }); else openIvForm({ id: d.id }); },
+  'cal-slot': d => openChooser(d.date, Number(d.hour)),
+  'iv-new': d => openIvForm({ date: d.date, time: d.time }),
+  'iv-new-go': () => { navigate('calendar'); openIvForm(); },
+  'un-new': d => openUnForm({ date: d.date, time: d.time }),
+  'chk-open': () => openChecker(),
+  'chk-add-iv': (d, el) => { const { g } = formVals(el.closest('form')); openIvForm({ date: g('date'), time: g('time'), tz: g('tz') }); },
+  'chk-add-un': (d, el) => {
+    const { g } = formVals(el.closest('form')), hz = state.settings.homeTz, info = slotInfo({ date: g('date'), time: g('time'), tz: g('tz'), dur: g('dur') });
+    if (info.error) { openUnForm(); return; }
+    const p = partsIn(info.start, hz); openUnForm({ date: `${p.year}-${pad(p.month)}-${pad(p.day)}`, time: `${pad(p.hour)}:${pad(p.minute)}` });
+  },
+  'iv-del-ask': (d, el) => { el.closest('.confirm-zone').innerHTML = '<span class="hint">Delete this interview?</span><button class="btn danger solid sm" type="button" data-action="iv-del-confirm">Yes, delete</button><button class="btn sm" type="button" data-action="iv-del-cancel">Cancel</button>'; },
+  'iv-del-cancel': (d, el) => { el.closest('.confirm-zone').innerHTML = '<button class="btn danger" type="button" data-action="iv-del-ask">Delete interview</button>'; },
+  'iv-del-confirm': (d, el) => {
+    const id = el.closest('form').dataset.id, iv = state.interviews.find(x => x.id === id); if (!iv) return;
+    state.interviews = state.interviews.filter(x => x !== iv); log(`Deleted the interview with ${ivNames(iv).company}`);
+    dlg.cal.close(); commit(); toast('Interview deleted.', { label: 'Undo', fn: () => { state.interviews.push(iv); commit(); } });
+  },
+  'un-del-ask': (d, el) => { el.closest('.confirm-zone').innerHTML = '<span class="hint">Delete this block?</span><button class="btn danger solid sm" type="button" data-action="un-del-confirm">Yes, delete</button><button class="btn sm" type="button" data-action="un-del-cancel">Cancel</button>'; },
+  'un-del-cancel': (d, el) => { el.closest('.confirm-zone').innerHTML = '<button class="btn danger" type="button" data-action="un-del-ask">Delete block</button>'; },
+  'un-del-confirm': (d, el) => {
+    const id = el.closest('form').dataset.id, un = state.unavail.find(x => x.id === id); if (!un) return;
+    state.unavail = state.unavail.filter(x => x !== un);
+    dlg.cal.close(); commit(); toast('Unavailable time deleted.', { label: 'Undo', fn: () => { state.unavail.push(un); commit(); } });
+  },
+  'export-xlsx': () => { downloadBlob(buildXlsx(reportSheets()), `jobtrail-report-${today()}.xlsx`); toast('Excel report downloaded.'); },
+  'export-csv': () => { downloadBlob(new Blob([toCsv(reportSheets()[0])], { type: 'text/csv;charset=utf-8' }), `jobtrail-applications-${today()}.csv`); toast('CSV downloaded.'); },
   'job-autofill': (d, el) => autofill(el.closest('form')),
   'ai-open': d => openAnalysis(d.id),
   'ai-analyze': async (d, el) => {
@@ -1151,7 +1694,7 @@ const actions = {
   'clear-ask': (d, el) => { el.closest('.confirm-zone').innerHTML = zoneHtml('clear', true); },
   'clear-cancel': (d, el) => { el.closest('.confirm-zone').innerHTML = zoneHtml('clear', false); },
   'clear-confirm': () => {
-    state = { version: 1, demoSeeded: false, cv: state.cv, settings: state.settings, profile: Object.assign({}, state.profile, { customized: true }), jobs: [], applications: [], tasks: [], activity: [] };
+    state = { version: 1, demoSeeded: false, cv: state.cv, settings: state.settings, interviews: [], unavail: [], profile: Object.assign({}, state.profile, { customized: true }), jobs: [], applications: [], tasks: [], activity: [] };
     dlg.profile.close(); ui.expanded.clear(); commit(); toast('Everything cleared. Add your first job to begin.');
   }
 };
@@ -1169,6 +1712,9 @@ document.addEventListener('submit', e => {
   if (kind === 'profile') saveProfile(form);
   else if (kind === 'job') saveJobForm(form);
   else if (kind === 'app') saveApp(form);
+  else if (kind === 'iv') saveIv(form);
+  else if (kind === 'un') saveUn(form);
+  else if (kind === 'chk') { /* nothing to save */ }
   else if (kind === 'task-add') {
     const f = new FormData(form), title = (f.get('title') || '').trim(), date = f.get('date'), errs = {};
     if (!title) errs.title = 'Enter a task, like “Tailor resume”.';
@@ -1187,6 +1733,20 @@ document.addEventListener('submit', e => {
 });
 
 document.addEventListener('change', e => { if (e.target && e.target.id === 'cvFile') handleCvFile(e.target); });
+document.addEventListener('change', e => {
+  const t = e.target; if (!t || !t.dataset) return;
+  if (t.dataset.change === 'home-tz' || t.dataset.change === 'alt-tz') {
+    if (validTz(t.value)) { state.settings[t.dataset.change === 'home-tz' ? 'homeTz' : 'altTz'] = t.value; save(); ui.focus = '#' + t.id; render(); }
+    return;
+  }
+  const form = t.closest && t.closest('form');
+  if (form && form.dataset.form === 'iv' && t.name === 'jobId') { const m = form.querySelector('[data-manual]'); if (m) m.hidden = !!t.value; }
+  if (form && form.dataset.form === 'un' && t.name === 'allDay') { const m = form.querySelector('[data-times]'); if (m) m.hidden = t.checked; }
+});
+['input', 'change'].forEach(ev => document.addEventListener(ev, e => {
+  const f = e.target && e.target.closest && e.target.closest('form[data-form="iv"],form[data-form="un"],form[data-form="chk"]');
+  if (f) calPreview(f);
+}));
 let tcTimer = null;
 document.addEventListener('input', e => {
   if (!e.target || e.target.id !== 'tc-text') return;
@@ -1216,6 +1776,10 @@ window.addEventListener('hashchange', () => { route(); main.focus({ preventScrol
 
 /* ============ Boot ============ */
 state = load();
+applyTheme();
+if (window.matchMedia) {
+  try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (state.settings.theme === 'system') applyTheme(); }); window.matchMedia('(max-width:760px)').addEventListener('change', () => { if (ui.view === 'calendar') render(); }); } catch (e) { /* older browsers */ }
+}
 state.applications.forEach(a => syncFollowUp(a));
 save();
 route();
