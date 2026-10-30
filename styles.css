@@ -337,3 +337,51 @@ button[aria-busy="true"]{opacity:.7;cursor:progress}
 .prev-status.bad{border-color:var(--danger-b);background:var(--danger-soft);color:var(--danger)}
 .theme-btn[aria-pressed="true"]{background:var(--teal-soft);color:var(--teal-dark)}
 @media (max-width:760px){.cal-tz{grid-template-columns:1fr}.mcell{min-height:64px;padding:4px}.mchip{font-size:.65rem}.cal-title{order:-1;flex-basis:100%}}
+
+/* ---- v4: tooltips, CV badge, pay estimator, prep, funnel, outreach, mail ---- */
+.lblrow{display:flex;align-items:center;gap:8px}
+.lblrow label{margin:0}
+.tip-btn{width:28px;height:28px;min-height:28px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--blue-text);font-weight:800;cursor:pointer;line-height:1;position:relative}
+.tip-btn::after{content:"";position:absolute;inset:-8px}
+.tip-btn:hover{background:var(--hover)}
+.tip{margin:6px 0 0;padding:10px 12px;border-radius:10px;background:var(--blue-soft);border:1px solid var(--blue-b);color:var(--blue-text);font-size:.92rem}
+.cv-badge-row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:8px 0}
+.badge.cv-ok{background:var(--ok-soft);color:var(--ok);border-color:var(--ok-b);font-size:.95rem}
+.badge.cv-warn{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-b)}
+.badge.cv-bad{background:var(--danger-soft);color:var(--danger);border-color:var(--danger-b)}
+.badge.cv-none{background:var(--neutral-bg);color:var(--neutral-text);border-color:var(--neutral-b)}
+.greet-sum{font-size:1.05rem;margin-top:6px}
+.paycalc{border:1px solid var(--border);border-radius:12px;padding:4px 14px 12px;margin:14px 0;background:var(--surface-2)}
+.paycalc summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:700}
+.pc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.pc-auto{grid-column:1/-1;display:grid;gap:8px}
+.pc-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.95rem}
+.pc-table th,.pc-table td{padding:8px 6px;border-bottom:1px solid var(--border);text-align:right}
+.pc-table th[scope=row]{text-align:left;font-weight:500}
+.pc-table thead th{font-size:.82rem;color:var(--muted)}
+.pc-table tr.ded td,.pc-table tr.ded th{color:var(--muted)}
+.pc-table tr.net th,.pc-table tr.net td{font-weight:800;border-top:2px solid var(--teal);border-bottom:0;color:var(--text)}
+.pc-keep{margin:8px 0}
+.prep h3{margin-bottom:8px}
+.pq-list{list-style:none;padding:0;margin:12px 0;display:grid;gap:12px}
+.pq{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--surface)}
+.pq-top{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:6px}
+.pq p{margin:4px 0}
+.lbl{font-weight:700;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.star{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:8px 0 0;font-size:.92rem}
+.star dt{font-weight:700;color:var(--teal-dark)}
+.star dd{margin:0}
+.funnel{margin-bottom:22px}
+.fn-steps{list-style:none;padding:0;margin:10px 0;display:grid;gap:12px}
+.fn-row{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
+.fn-name{font-weight:700;min-width:84px}
+.fn-num{font-weight:800;font-size:1.3rem;min-width:36px}
+.fn-bar{height:10px;border-radius:6px;background:var(--hover);margin-top:4px;overflow:hidden}
+.fn-bar span{display:block;height:100%;background:var(--teal);border-radius:6px}
+.fn-insight{margin:8px 0}
+.out-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#out-count.over{color:var(--danger);font-weight:700}
+.mailed{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 12px;border-radius:10px;border:1px solid var(--warn-b);background:var(--warn-soft);color:var(--warn);flex-basis:100%}
+@media (max-width:760px){.out-grid{grid-template-columns:1fr}.pc-table{font-size:.88rem}}
+
+[hidden]{display:none !important}

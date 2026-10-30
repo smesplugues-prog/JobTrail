@@ -14,7 +14,7 @@ const LIB = {
   docx: { src: 'https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js', integrity: 'sha384-nFoSjZIoH3CCp8W639jJyQkuPHinJ2NHe7on1xvlUA7SuGfJAfvMldrsoAVm6ECz' }
 };
 const emptyCv = () => ({ text: '', name: '', updatedAt: null });
-const defaultSettings = () => { const h = browserTz(); return { model: DEFAULT_MODEL, autoAnalyze: true, pageReader: true, redact: true, theme: 'system', homeTz: h, altTz: h === 'Europe/London' ? 'Europe/Madrid' : 'Europe/London' }; };
+const defaultSettings = () => { const h = browserTz(); return { model: DEFAULT_MODEL, autoAnalyze: true, pageReader: true, redact: true, theme: 'system', fx: 1.2, homeTz: h, altTz: h === 'Europe/London' ? 'Europe/Madrid' : 'Europe/London' }; };
 const STAGES = ['Applied', 'Interviewing', 'Offer', 'Rejected', 'Withdrawn'];
 const INACTIVE = ['Rejected', 'Withdrawn'];
 const ARR = ['Remote', 'Hybrid', 'On-site'];
@@ -80,7 +80,7 @@ function seed() {
     settings: defaultSettings(),
     interviews: [],
     unavail: [],
-    profile: { role: 'Data Analyst', location: 'New York, NY', level: 'mid', skills: ['SQL', 'Excel', 'Tableau', 'Python'], arrangements: ['Hybrid', 'Remote'], salaryMin: 75000, customized: false },
+    profile: { name: 'Sandra', role: 'Data Analyst', location: 'New York, NY', level: 'mid', skills: ['SQL', 'Excel', 'Tableau', 'Python'], arrangements: ['Hybrid', 'Remote'], salaryMin: 75000, customized: false },
     jobs,
     applications: [app],
     tasks: [{ id: 'demo-task-resume', type: 'custom', title: 'Update resume with your latest dashboard project', dueDate: addDays(t, 2), done: false }],
@@ -115,11 +115,15 @@ function normalize(s) {
   if (!Array.isArray(p.skills)) p.skills = [];
   if (!Array.isArray(p.arrangements)) p.arrangements = [];
   if (!LEVELS[p.level]) p.level = 'mid';
+  { const fx = Number(s.settings.fx); s.settings.fx = fx >= 0.2 && fx <= 5 ? fx : 1.2; }
+  p.name = typeof p.name === 'string' && p.name.trim() ? p.name.trim().slice(0, 40) : 'Sandra';
   s.jobs.forEach(j => { if (!Array.isArray(j.skills)) j.skills = []; j.title = j.title || 'Untitled'; j.company = j.company || ''; j.location = j.location || ''; j.arrangement = ARR.includes(j.arrangement) ? j.arrangement : 'Hybrid'; j.addedAt = j.addedAt || new Date().toISOString(); j.status = j.status || 'new';
     if (j.description != null && typeof j.description !== 'string') j.description = '';
     if (j.ai && !(typeof j.ai.score === 'number' && typeof j.ai.summary === 'string')) delete j.ai;
-    if (j.tailored && typeof j.tailored.text !== 'string') delete j.tailored; });
-  s.applications.forEach(a => { if (!STAGES.includes(a.stage)) a.stage = 'Applied'; a.appliedDate = validDate(a.appliedDate) ? a.appliedDate : today(); });
+    if (j.tailored && typeof j.tailored.text !== 'string') delete j.tailored;
+    if (j.pay && typeof j.pay === 'object') { const g = Number(j.pay.gbp); j.pay = { gbp: g > 0 && g <= 1e7 ? g : 0, type: j.pay.type === 'auto' ? 'auto' : 'payroll', costs: Number(j.pay.costs) > 0 ? Math.min(Number(j.pay.costs), 1e7) : 0, flat: !!j.pay.flat }; } else delete j.pay;
+    if (j.outreach && typeof j.outreach.message !== 'string') delete j.outreach; });
+  s.applications.forEach(a => { if (!STAGES.includes(a.stage)) a.stage = 'Applied'; a.appliedDate = validDate(a.appliedDate) ? a.appliedDate : today(); a.furthest = furthestOf(a); cleanPrep(a); });
   return s;
 }
 function load() {
@@ -439,7 +443,7 @@ async function handleCvFile(input) {
     if (text.length > MAX_CV) { text = text.slice(0, MAX_CV); note = ' It was very long, so the end was cut off.'; }
     state.cv = { text, name: f.name, updatedAt: new Date().toISOString() };
     const ta = $('#pf-cvText'); if (ta) ta.value = text;
-    save();
+    save(); refreshCvBadge();
     say(`Saved ${f.name} (${text.length.toLocaleString()} characters). Check the text below looks right.${note}`);
   } catch (err) {
     say(err && err.message && !/^(Failed|Invalid|Missing|Unexpected)/.test(err.message) ? err.message : "That file couldn't be read. It may be damaged or password-protected. Paste the text instead.", true);
@@ -918,7 +922,7 @@ function saveIv(form) {
   dlg.cal.close(); commit();
   const app = job && appForJob(job.id);
   if (!id && app && app.stage === 'Applied') {
-    toast(`Interview added for ${fmtWhen(iv.start, state.settings.homeTz)}. Move this application to Interviewing?`, { label: 'Move', fn: () => { app.stage = 'Interviewing'; log(`Moved ${job.company} to Interviewing`); commit(); toast('Moved to Interviewing.'); } });
+    toast(`Interview added for ${fmtWhen(iv.start, state.settings.homeTz)}. Move this application to Interviewing?`, { label: 'Move', fn: () => { app.stage = 'Interviewing'; app.furthest = furthestOf(app); log(`Moved ${job.company} to Interviewing`); commit(); toast('Moved to Interviewing.'); } });
   } else toast(id ? 'Interview updated.' : `Interview added for ${fmtWhen(iv.start, state.settings.homeTz)}.`);
 }
 function saveUn(form) {
@@ -1049,10 +1053,298 @@ function downloadBlob(blob, name) {
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+/* ============ Pay estimator: UK salary -> take-home in Spain ============ */
+/* Spanish 2026 parameters (national default scale). Sources: Agencia Tributaria (work-income reduction), Seguridad Social 2026 rates, RETA 2026 table. */
+const ES = {
+  year: 2026,
+  scale: [[12450, .19], [20200, .24], [35200, .30], [60000, .37], [300000, .45], [Infinity, .47]],
+  personalMin: 5550, workExpenses: 2000, ssRate: .065, ssMaxBaseMonth: 5101.20,
+  autoDeduct: .07, difficultPct: .05, difficultMax: 2000, flatFee: 80,
+  reta: [[670, 205.88], [900, 226.47], [1166.69, 267.65], [1300, 299.56], [1500, 302.65], [1700, 302.65], [1850, 360.29], [2030, 380.88], [2330, 401.47], [2760, 427.21], [3190, 452.94], [3620, 478.68], [4050, 504.41], [6000, 545.59], [Infinity, 607.35]]
+};
+const DEFAULT_FX = 1.2;
+function esTax(base) { let tax = 0, prev = 0; for (const [lim, r] of ES.scale) { if (base > prev) tax += (Math.min(base, lim) - prev) * r; prev = lim; } return tax; }
+const esQuota = base => Math.max(0, esTax(base) - esTax(ES.personalMin));
+function workReduction(rn) { if (rn <= 14852) return 7302; if (rn <= 17673.52) return 7302 - 1.75 * (rn - 14852); if (rn <= 19747.5) return 2364.34 - 1.14 * (rn - 17673.52); return 0; }
+function calcPay(v) {
+  const G = v.gbp * v.fx, lines = [];
+  let net;
+  if (v.type === 'auto') {
+    const costs = Math.min(Math.max(0, v.costs || 0), G), y = G - costs;
+    const m = y * (1 - ES.autoDeduct) / 12;
+    const cuota = v.flat ? ES.flatFee : ES.reta.find(r => m <= r[0])[1];
+    const ss = cuota * 12, prev = Math.max(0, y - ss), base = Math.max(0, prev - Math.min(prev * ES.difficultPct, ES.difficultMax));
+    const tax = esQuota(base);
+    if (costs > 0) lines.push(['Business costs you entered', costs]);
+    lines.push([v.flat ? 'Social Security (flat rate, first 12 months)' : 'Social Security (autónomo, minimum for your income bracket)', ss], ['Income tax (IRPF) estimate', tax]);
+    net = y - ss - tax;
+  } else {
+    const ss = Math.min(G, ES.ssMaxBaseMonth * 12) * ES.ssRate;
+    const rn = Math.max(0, G - ss - ES.workExpenses);
+    const base = Math.max(0, rn - workReduction(rn));
+    const tax = esQuota(base);
+    lines.push(['Social Security (employee share)', ss], ['Income tax (IRPF) estimate', tax]);
+    net = G - ss - tax;
+  }
+  return { gross: G, net, lines, keep: G > 0 ? net / G : 0 };
+}
+const eurF = n => '€' + Math.round(n).toLocaleString('en-GB');
+const gbpF = n => '£' + Math.round(n).toLocaleString('en-GB');
+const PAY_TYPES = ['payroll', 'auto'];
+function payVals(j) {
+  const p = (j && j.pay) || {};
+  const fx = Number(state.settings.fx);
+  return { gbp: Number(p.gbp) > 0 ? Number(p.gbp) : 0, type: PAY_TYPES.includes(p.type) ? p.type : 'payroll', costs: Number(p.costs) > 0 ? Number(p.costs) : 0, flat: !!p.flat, fx: fx > 0 ? fx : DEFAULT_FX };
+}
+function payOut(v) {
+  if (!(v.gbp > 0)) return '<p class="muted">Enter a gross yearly salary in pounds to see an estimate.</p>';
+  const r = calcPay(v), mo = n => n / 12, back = n => n / v.fx;
+  return `<table class="pc-table"><caption class="sr-only">Estimated monthly pay</caption>
+    <thead><tr><th scope="col"><span class="sr-only">Item</span></th><th scope="col">€ per month</th><th scope="col">£ equivalent</th></tr></thead><tbody>
+    <tr><th scope="row">Gross</th><td>${eurF(mo(r.gross))}</td><td>${gbpF(mo(back(r.gross)))}</td></tr>
+    ${r.lines.map(l => `<tr class="ded"><th scope="row">− ${esc(l[0])}</th><td>−${eurF(mo(l[1]))}</td><td>−${gbpF(mo(back(l[1])))}</td></tr>`).join('')}
+    <tr class="net"><th scope="row">Estimated net (take-home)</th><td>${eurF(mo(r.net))}</td><td>${gbpF(mo(back(r.net)))}</td></tr></tbody></table>
+    <p class="pc-keep">You keep about <strong>${Math.round(r.keep * 100)}%</strong> of the gross amount (${eurF(r.gross)} a year → ${eurF(r.net)} a year).</p>`;
+}
+function payCalc(j, ctx) {
+  const v = payVals(j), k = `${ctx}-${j.id}`;
+  return `<details class="paycalc" data-pc="${esc(j.id)}" ${v.gbp ? 'open' : ''}><summary>Pay estimator: UK salary → take-home in Spain (£ / €)</summary>
+    <div class="pc-grid">
+      <div class="field"><label for="pcg-${k}">Gross yearly salary (£)</label><input id="pcg-${k}" name="pcGbp" data-pc-in type="number" inputmode="decimal" min="0" max="10000000" step="500" value="${v.gbp || ''}" placeholder="e.g. 40000"></div>
+      <div class="field"><label for="pct-${k}">Employment type</label><select id="pct-${k}" name="pcType" data-pc-in>
+        <option value="payroll" ${v.type === 'payroll' ? 'selected' : ''}>Payroll / EOR (Employer of Record or payroll)</option>
+        <option value="auto" ${v.type === 'auto' ? 'selected' : ''}>Self-employed / Autónomo (contractor in Spain)</option></select></div>
+      <div class="field"><label for="pcf-${k}">Exchange rate (€ per £1)</label><input id="pcf-${k}" name="pcFx" data-pc-in type="number" inputmode="decimal" min="0.2" max="5" step="0.0001" value="${v.fx}"><p class="hint">Starts at about the 30 Oct 2026 rate. Update it for a closer estimate.</p></div>
+      <div class="pc-auto" ${v.type === 'auto' ? '' : 'hidden'}>
+        <div class="field"><label for="pcc-${k}">Business costs per year (€) <span class="opt">(optional)</span></label><input id="pcc-${k}" name="pcCosts" data-pc-in type="number" inputmode="decimal" min="0" step="100" value="${v.costs || ''}" placeholder="0"></div>
+        <label class="check-line"><input type="checkbox" name="pcFlat" data-pc-in ${v.flat ? 'checked' : ''}> I'm a new autónomo on the €${ES.flatFee}/month flat rate (first 12 months)</label>
+      </div>
+    </div>
+    <div class="pc-out" aria-live="polite">${payOut(v)}</div>
+    <p class="hint">Estimate only, not tax advice. Assumes you live and pay tax in Spain, ${ES.year} national tax scale, 12 monthly payments, no family or regional deductions, and (for autónomo) your salary figure is what you invoice, without VAT. If you stay UK-tax-resident, UK tax and National Insurance apply instead and this tool does not cover that. Ask a gestor or accountant before you decide.</p>
+  </details>`;
+}
+function pcRead(box) {
+  const q = n => box.querySelector(`[name="${n}"]`);
+  const num = n => { const x = parseFloat(q(n) && q(n).value); return Number.isFinite(x) && x > 0 ? Math.min(x, 1e7) : 0; };
+  const fx = parseFloat(q('pcFx') && q('pcFx').value);
+  return { gbp: num('pcGbp'), type: q('pcType').value === 'auto' ? 'auto' : 'payroll', costs: num('pcCosts'), flat: !!(q('pcFlat') && q('pcFlat').checked), fx: fx >= 0.2 && fx <= 5 ? fx : (Number(state.settings.fx) || DEFAULT_FX) };
+}
+function pcUpdate(box, persist) {
+  const v = pcRead(box), a = box.querySelector('.pc-auto'); if (a) a.hidden = v.type !== 'auto';
+  box.querySelector('.pc-out').innerHTML = payOut(v);
+  if (persist) {
+    const j = getJob(box.dataset.pc); if (!j) return;
+    j.pay = { gbp: v.gbp, type: v.type, costs: v.costs, flat: v.flat };
+    state.settings.fx = v.fx; save();
+  }
+}
+
+/* ============ Profile helpers: tooltips and CV-saved badge ============ */
+const TIPS = {
+  role: "Compared with each job's title to build the Quick Match and Gap Analysis, including for jobs you add by hand. AI Fit Scores read your master CV and the job text instead, not this field.",
+  location: "Compared with each job's location in the Quick Match and Gap Analysis. Remote jobs skip this check.",
+  level: "Compared with the years of experience a job asks for, in the Quick Match and Gap Analysis.",
+  skills: "Matched against each job's listed skills. The ones you lack show up in the Gap Analysis. The AI Fit Score uses the skills written in your master CV.",
+  salaryMin: "Compared with a job's top salary in the Quick Match and Gap Analysis. Jobs with no salary listed are flagged as unknown."
+};
+function persistedCv() { try { const s = JSON.parse(localStorage.getItem(KEY)); return s && s.cv && typeof s.cv.text === 'string' ? s.cv.text : ''; } catch (e) { return null; } }
+function cvBadge(draft) {
+  const saved = persistedCv(), cur = state.cv.text || '';
+  const typed = cleanCv(draft == null ? cur : draft);
+  if (saved === null || !storageOk) return { cls: 'cv-bad', head: '⚠ Not saved', note: 'This browser is blocking storage, so your CV will be lost when you close the tab.' };
+  if (!typed && !saved) return { cls: 'cv-none', head: 'No CV saved yet', note: 'Upload a file or paste your text below.' };
+  if (typed !== saved) return { cls: 'cv-warn', head: 'Unsaved changes', note: 'Press “Save preferences” to keep this text.' };
+  const when = state.cv.updatedAt ? ` · saved ${relTime(state.cv.updatedAt)}` : '';
+  return { cls: 'cv-ok', head: '✓ CV Saved', note: `${state.cv.name || 'Pasted text'} · ${saved.length.toLocaleString()} characters${when}. It stays in this browser after you close it. Clearing site data or private browsing erases it, so keep a backup.` };
+}
+function cvBadgeHtml(draft) { const b = cvBadge(draft); return `<span class="badge ${b.cls}" id="cv-badge">${esc(b.head)}</span> <span class="hint" id="cv-badge-note">${esc(b.note)}</span>`; }
+function refreshCvBadge() { const box = $('#cv-badge-box'); if (!box) return; const ta = $('#pf-cvText'); box.innerHTML = cvBadgeHtml(ta ? ta.value : null); }
+
+/* ============ Interview prep ============ */
+const stageRank = s => (s === 'Offer' ? 2 : s === 'Interviewing' ? 1 : 0);
+const furthestOf = a => Math.max(Number.isInteger(a.furthest) ? a.furthest : 0, stageRank(a.stage));
+function ensurePrep(a) { if (!a.prep || typeof a.prep !== 'object') a.prep = { questions: [], notes: {} }; if (!Array.isArray(a.prep.questions)) a.prep.questions = []; if (!a.prep.notes || typeof a.prep.notes !== 'object') a.prep.notes = {}; return a.prep; }
+async function aiPrep(j) {
+  const { text: cv, map } = redact(state.cv.text.slice(0, MAX_CV));
+  const u = `Create exactly 5 interview questions this candidate is likely to be asked for this job. Return JSON of this shape:
+{"questions":[{"type":"Technical"|"Behavioural","question":string,"why":string (max 160 chars: what the interviewer is testing),"cvEvidence":string (max 220 chars: the real experience in the CV that best answers it, or "Nothing in the CV matches directly: use a related example you can honestly describe"),"star":{"situation":string,"task":string,"action":string,"result":string}}]}
+Rules: 2 or 3 questions are technical (tools, skills or role-specific scenarios from the job text), the rest are behavioural. Each "star" value is a coaching prompt of at most 140 characters telling the candidate what to describe for that part of a STAR answer, built ONLY from experience that appears in the CV. Never invent employers, projects, tools or numbers. Questions must reflect requirements in the job text. If the job text is missing or very short, base the questions on the title and skills, and say so in the first "why".
+
+<cv>
+${cv}
+</cv>
+
+<job>
+${jobText(j)}
+</job>`;
+  const r = await gemini(SYS, u);
+  const qs = A(r.questions).slice(0, 5).map(q => { q = q || {}; const st = q.star || {}; return { type: q.type === 'Technical' ? 'Technical' : 'Behavioural', question: restore(S(q.question, 300), map), why: restore(S(q.why, 200), map), cvEvidence: restore(S(q.cvEvidence, 260), map), star: { situation: restore(S(st.situation, 180), map), task: restore(S(st.task, 180), map), action: restore(S(st.action, 180), map), result: restore(S(st.result, 180), map) } }; }).filter(q => q.question);
+  if (qs.length < 3) throw new AIError('The AI returned too few questions. Try again.');
+  return qs;
+}
+function prepInner(a) {
+  const p = ensurePrep(a), busyP = busy.has('p' + a.id), j = getJob(a.jobId);
+  const noDesc = j && !(j.description && j.description.trim().length > 40);
+  const qs = p.questions;
+  return `${noDesc ? '<p class="notice">This job has no saved description, so the questions will be based on its title and skills. Add the description on the job card for sharper ones.</p>' : ''}
+    <div class="actions-row"><button class="btn primary" type="button" data-action="prep-gen" data-id="${esc(a.id)}" ${busyP ? 'disabled aria-busy="true"' : ''}>${busyP ? 'Writing questions…' : qs.length ? 'Regenerate 5 questions' : 'Generate 5 interview questions'}</button></div>
+    ${qs.length ? `<ol class="pq-list">${qs.map(q => `<li class="pq"><div class="pq-top"><span class="chip ${q.type === 'Technical' ? 'match' : ''}">${esc(q.type)}</span><strong>${esc(q.question)}</strong></div>
+      ${q.why ? `<p><span class="lbl">Why they ask</span> ${esc(q.why)}</p>` : ''}
+      ${q.cvEvidence ? `<p><span class="lbl">From your CV</span> ${esc(q.cvEvidence)}</p>` : ''}
+      <dl class="star"><dt>Situation</dt><dd>${esc(q.star.situation)}</dd><dt>Task</dt><dd>${esc(q.star.task)}</dd><dt>Action</dt><dd>${esc(q.star.action)}</dd><dt>Result</dt><dd>${esc(q.star.result)}</dd></dl></li>`).join('')}</ol>
+      <p class="hint">Generated by AI from your CV and the job text. The STAR lines are prompts for you to fill with your own real examples, not ready-made answers.${p.at ? ` · ${esc(relTime(p.at))}` : ''}</p>` : ''}`;
+}
+function prepSection(a) {
+  const p = ensurePrep(a), on = a.stage === 'Interviewing', n = p.notes;
+  const ta = (key, label, ph) => `<div class="field"><label for="af-prep-${key}">${label} <span class="opt">(optional)</span></label><textarea id="af-prep-${key}" data-prepnote="${key}" maxlength="3000" rows="4" placeholder="${esc(ph)}">${esc(n[key] || '')}</textarea></div>`;
+  return `<p class="hint" data-prep-locked ${on ? 'hidden' : ''}>Interview Prep unlocks when this application's stage is “Interviewing”.</p>
+    <section class="prep section-sep" data-prep ${on ? '' : 'hidden'} aria-labelledby="prep-h"><h3 id="prep-h">Interview prep</h3>
+      <div id="prep-box" data-id="${esc(a.id)}">${prepInner(a)}</div>
+      ${ta('interviewer', 'Interviewer details', 'Names, roles, LinkedIn, what they care about…')}
+      ${ta('research', 'Company research', 'Products, news, culture, competitors, why you want to work there…')}
+      ${ta('ask', 'Questions I want to ask', 'e.g. What does success look like in the first 90 days?')}
+    </section>`;
+}
+async function prepFlow(id) {
+  const a = getApp(id), j = a && getJob(a.jobId); if (!a || !j || busy.has('p' + id) || needSetup()) return;
+  busy.add('p' + id); prepRender(id);
+  try {
+    const qs = await aiPrep(j); const p = ensurePrep(a);
+    p.questions = qs; p.at = new Date().toISOString(); p.model = state.settings.model;
+    log(`Generated interview questions for ${j.company}`); busy.delete('p' + id); save(); prepRender(id); toast('Interview questions are ready.');
+  } catch (e) { busy.delete('p' + id); prepRender(id); toast(e instanceof AIError ? e.message : 'Something went wrong while writing the questions. Try again.'); }
+}
+function prepRender(id) { const box = $('#prep-box'); const a = getApp(id); if (box && a && box.dataset.id === id) box.innerHTML = prepInner(a); }
+
+/* ============ Outreach message ============ */
+const wc = s => (String(s || '').match(/\S+/g) || []).length;
+const OUT_LIMIT = 150;
+async function aiOutreach(j, channel, recipient) {
+  const { text: cv, map } = redact(state.cv.text.slice(0, MAX_CV));
+  const name = state.profile.name || 'Sandra', mail = channel === 'email';
+  let last = null, msg = '', subj = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const u = `Write a short outreach message from the candidate to a recruiter or hiring manager about this job. Channel: ${mail ? 'email' : 'LinkedIn message'}. Return JSON: {"subject":string (${mail ? 'max 70 chars' : 'empty string'}),"message":string}.
+Rules:
+- Under ${attempt ? 90 : 120} words in total (hard limit ${OUT_LIMIT}). Professional, warm and specific, never generic.
+- Open with a concrete reason tied to this role or company. Then mention exactly two strengths from the CV that match the job, each with brief real evidence (only use numbers that appear in the CV).
+- End with one clear, low-pressure call to action.
+- Avoid clichés ("I hope this finds you well", "passionate", "excited to apply", "perfect fit"). No emojis, no hashtags, no bullet points.
+- Do not invent facts, employers, metrics, mutual connections or knowledge about the company beyond the job text.
+- Greeting: "Hi ${recipient || '[Name]'},". Sign off with the first name ${name}.
+${attempt ? `Your previous draft had ${wc(msg)} words. Make it clearly shorter.\n` : ''}
+<cv>
+${cv}
+</cv>
+
+<job>
+${jobText(j)}
+</job>`;
+    const r = await gemini(SYS, u);
+    msg = restore(S(r.message, 1500), map); subj = restore(S(r.subject, 100), map); last = r;
+    if (!msg) throw new AIError('The AI returned an empty message. Try again.');
+    if (wc(msg) <= OUT_LIMIT) break;
+  }
+  return { subject: mail ? subj : '', message: msg, tooLong: wc(msg) > OUT_LIMIT };
+}
+function outMailHref(subject, body) { return `mailto:?subject=${encodeURIComponent(subject || '')}&body=${encodeURIComponent(body || '')}`; }
+function openOutreach(id) {
+  const j = getJob(id); if (!j) return;
+  ui.outJobId = id;
+  const o = j.outreach || {}, ch = o.channel === 'email' ? 'email' : 'linkedin', busyO = busy.has('o' + id);
+  const body = `<p class="notice">Short, specific and based on your CV and this job. I never invent facts, so read it through and add the recruiter's real name before sending.</p>
+    <div class="out-grid">
+      <div class="field"><label for="out-channel">Where will you send it?</label><select id="out-channel"><option value="linkedin" ${ch === 'linkedin' ? 'selected' : ''}>LinkedIn message</option><option value="email" ${ch === 'email' ? 'selected' : ''}>Email</option></select></div>
+      <div class="field"><label for="out-recipient">Recipient's first name <span class="opt">(optional)</span></label><input type="text" id="out-recipient" maxlength="40" value="${esc(o.recipient || '')}" placeholder="e.g. Maria"></div>
+    </div>
+    ${o.message ? `<div class="field" id="out-subject-row" ${ch === 'email' ? '' : 'hidden'}><label for="out-subject">Subject</label><input type="text" id="out-subject" maxlength="100" value="${esc(o.subject || '')}"></div>
+    <div class="field"><label for="out-text">Message</label><textarea id="out-text" rows="9" maxlength="1500">${esc(o.message)}</textarea>
+      <p class="hint" id="out-count" role="status">${wc(o.message)} words (limit ${OUT_LIMIT})</p></div>
+    <p class="hint">LinkedIn connection requests allow only about 300 characters. For those, shorten this to its first two sentences, or send it as a message after you connect.</p>` : '<p class="muted">Choose where you will send it, then press Generate.</p>'}`;
+  const foot = `<button class="btn primary" type="button" data-action="out-gen" data-id="${esc(id)}" ${busyO ? 'disabled aria-busy="true"' : ''}>${busyO ? 'Writing…' : o.message ? 'Regenerate' : 'Generate message'}</button>
+    ${o.message ? `<button class="btn" type="button" data-action="out-copy">Copy</button><a class="btn" id="out-mail" href="${esc(outMailHref(o.subject, o.message))}" ${ch === 'email' ? '' : 'hidden'}>Open in mail app</a>` : ''}
+    <button class="btn" type="button" data-action="close-dialog">Close</button>`;
+  openDlg(dlg.out, panel('Draft outreach message', `${j.title} · ${j.company}`, body, foot), `Outreach message for ${j.title} at ${j.company}`);
+  if (o.tooLong) { const c = $('#out-count'); if (c) c.classList.add('over'); }
+}
+async function outreachFlow(id) {
+  const j = getJob(id); if (!j || busy.has('o' + id) || needSetup()) return;
+  const channel = ($('#out-channel') || {}).value === 'email' ? 'email' : 'linkedin', recipient = (($('#out-recipient') || {}).value || '').trim().slice(0, 40);
+  busy.add('o' + id); j.outreach = Object.assign({}, j.outreach, { channel, recipient }); openOutreach(id);
+  try {
+    const r = await aiOutreach(j, channel, recipient);
+    j.outreach = { channel, recipient, subject: r.subject, message: r.message, tooLong: r.tooLong, at: new Date().toISOString(), model: state.settings.model };
+    log(`Drafted an outreach message for ${j.title} at ${j.company}`); busy.delete('o' + id); save();
+    if (dlg.out.open && ui.outJobId === id) openOutreach(id);
+    if (r.tooLong) toast(`The draft is over ${OUT_LIMIT} words. Please shorten it before sending.`);
+  } catch (e) {
+    busy.delete('o' + id); if (dlg.out.open && ui.outJobId === id) openOutreach(id);
+    toast(e instanceof AIError ? e.message : 'Something went wrong while writing the message. Try again.');
+  }
+}
+
+/* ============ Funnel analytics ============ */
+function funnelData() {
+  const saved = new Set(state.jobs.filter(j => j.status === 'saved' || j.status === 'applied').map(j => j.id));
+  state.applications.forEach(a => saved.add(a.jobId));
+  const apps = state.applications;
+  const int = apps.filter(a => furthestOf(a) >= 1 || state.interviews.some(i => i.jobId === a.jobId)).length;
+  const off = apps.filter(a => furthestOf(a) >= 2).length;
+  return { saved: saved.size, applied: apps.length, int, off };
+}
+const pct = (a, b) => (b > 0 ? Math.round(a / b * 100) : null);
+function funnelCard() {
+  const f = funnelData(), top = Math.max(f.saved, f.applied, 1);
+  const steps = [['Saved', f.saved, null, null], ['Applied', f.applied, pct(f.applied, f.saved), 'of saved jobs'], ['Interview', f.int, pct(f.int, f.applied), 'of applications'], ['Offer', f.off, pct(f.off, f.int), 'of interviews']];
+  const rates = [['Saved → Applied', f.applied, f.saved], ['Applied → Interview', f.int, f.applied], ['Interview → Offer', f.off, f.int]];
+  const enough = rates.filter(r => r[2] >= 5 && r[2] > 0).map(r => ({ name: r[0], p: pct(r[1], r[2]) }));
+  const worst = enough.length ? enough.reduce((m, r) => (r.p < m.p ? r : m)) : null;
+  const insight = f.applied < 5
+    ? `Only ${plural(f.applied, 'application')} so far, which is too few to spot a pattern. Rates become more meaningful after about 10 applications.`
+    : worst ? `Biggest drop: <strong>${esc(worst.name)}</strong> at ${worst.p}%. ${worst.name.startsWith('Applied') ? 'If this stays low, review your CV and how well you match each role before applying.' : worst.name.startsWith('Saved') ? 'You save more jobs than you apply to. Decide faster, or save fewer.' : 'If this stays low, practise interviews with the Interview Prep section.'}` : 'Not enough interviews yet to judge the last step.';
+  return `<section class="card funnel" aria-labelledby="fn-h"><h2 id="fn-h">Your application funnel</h2>
+    <ol class="fn-steps">${steps.map(s => `<li><div class="fn-row"><span class="fn-name">${s[0]}</span><span class="fn-num">${s[1]}</span>${s[2] != null ? `<span class="fn-pct">${s[2]}% <span class="muted">${s[3]}</span></span>` : '<span class="fn-pct muted">starting point</span>'}</div><div class="fn-bar" aria-hidden="true"><span style="width:${Math.max(s[1] ? 3 : 0, Math.round(s[1] / top * 100))}%"></span></div></li>`).join('')}</ol>
+    <p class="fn-insight">${insight}</p>
+    <p class="hint">“Saved” counts jobs you saved or applied to. “Interview” counts applications that reached Interviewing or Offer, or have an interview on your calendar. Applications rejected before this feature existed can't be traced back to interviews unless you logged one.</p></section>`;
+}
+
+/* ============ Follow-up email quick-logger ============ */
+const emailIn = s => { const m = String(s || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i); return m ? m[0] : ''; };
+function followMail(a) {
+  const j = getJob(a.jobId) || { title: 'the', company: 'your company' }, name = state.profile.name || 'Sandra', to = emailIn(a.contactDetails);
+  const subject = `Following up: ${j.title} Application - ${name}`;
+  const body = [`Hi ${a.contactName || 'there'},`, '', `I hope you're well. I'm following up on my application for the ${j.title} role at ${j.company}, which I submitted on ${fmtDate(a.appliedDate)}. I remain very interested in the opportunity and would be grateful for any update on the next steps.`, '', 'Please let me know if I can provide anything further.', '', 'Kind regards,', name].join('\r\n');
+  return { to, subject, body, href: `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}` };
+}
+function mailRow(task) {
+  const a = getApp(task.appId); if (!a) return '';
+  if (ui.mailed === task.id) return `<div class="mailed" role="status"><span>Your mail app should have opened${followMail(a).to ? '' : ' (no email address is in the contact details, so “To” is empty)'}. Did you send it?</span>
+    <button class="btn primary sm" type="button" data-action="mail-done" data-id="${esc(task.id)}">Yes, log follow-up as done</button><button class="btn sm" type="button" data-action="mail-dismiss">Not yet</button></div>`;
+  return `<a class="btn sm" href="${esc(followMail(a).href)}" data-mail="${esc(task.id)}">Send email</a>`;
+}
+
+function cleanPrep(a) {
+  if (!a.prep || typeof a.prep !== 'object') { delete a.prep; return; }
+  const pq = Array.isArray(a.prep.questions) ? a.prep.questions : [], t = (v, n) => String(v == null ? '' : v).slice(0, n);
+  a.prep.questions = pq.filter(q => q && typeof q.question === 'string').slice(0, 5).map(q => { const st = q.star || {}; return { type: q.type === 'Technical' ? 'Technical' : 'Behavioural', question: t(q.question, 300), why: t(q.why, 200), cvEvidence: t(q.cvEvidence, 260), star: { situation: t(st.situation, 180), task: t(st.task, 180), action: t(st.action, 180), result: t(st.result, 180) } }; });
+  const n = a.prep.notes && typeof a.prep.notes === 'object' ? a.prep.notes : {};
+  a.prep.notes = { interviewer: t(n.interviewer, 3000), research: t(n.research, 3000), ask: t(n.ask, 3000) };
+}
+let outTimer = null;
+function updateOut() {
+  const j = getJob(ui.outJobId); if (!j || !j.outreach) return;
+  const t = $('#out-text'), sj = $('#out-subject');
+  if (t) { j.outreach.message = t.value; const c = $('#out-count'); if (c) { const n = wc(t.value); c.textContent = `${n} words (limit ${OUT_LIMIT})`; c.classList.toggle('over', n > OUT_LIMIT); } }
+  if (sj) j.outreach.subject = sj.value;
+  const m = $('#out-mail'); if (m) m.href = outMailHref(j.outreach.subject, j.outreach.message);
+  clearTimeout(outTimer); outTimer = setTimeout(save, 400);
+}
+
 /* ============ UI state ============ */
-const ui = { cal: { view: 'week', date: '' }, calScrollTo: 0, aiJobId: null, cvJobId: null, view: 'dashboard', jobStatus: 'review', jobArr: 'all', appStage: 'all', expanded: new Set(), highlight: null, reschedId: null, focus: null };
+const ui = { mailed: null, outJobId: null, cal: { view: 'week', date: '' }, calScrollTo: 0, aiJobId: null, cvJobId: null, view: 'dashboard', jobStatus: 'review', jobArr: 'all', appStage: 'all', expanded: new Set(), highlight: null, reschedId: null, focus: null };
 const main = $('#main');
-const dlg = { app: $('#appDialog'), profile: $('#profileDialog'), job: $('#jobDialog'), ai: $('#aiDialog'), cv: $('#cvDialog'), cal: $('#calDialog') };
+const dlg = { app: $('#appDialog'), profile: $('#profileDialog'), job: $('#jobDialog'), ai: $('#aiDialog'), cv: $('#cvDialog'), cal: $('#calDialog'), out: $('#outDialog') };
 let toastTimer = null, toastAction = null;
 
 function toast(msg, action) {
@@ -1102,7 +1394,7 @@ function nextStep() {
     const app = getApp(task.appId);
     const n = daysBetween(t, task.dueDate);
     return {
-      kind: 'followup', title: task.title,
+      kind: 'followup', taskId: task.id, title: task.title,
       sub: `${n < 0 ? plural(-n, 'day') + ' overdue' : 'Due today'} · Applied ${fmtDate(app.appliedDate)}`,
       primary: { label: 'Open application', action: 'app-open', id: app.id, focus: 'followUpDate' },
       secondary: { label: 'Mark follow-up done', action: 'task-complete', id: task.id }
@@ -1119,13 +1411,19 @@ function nextStep() {
   }
   const custom = open.filter(x => x.type === 'custom' && x.dueDate <= t);
   if (custom.length) return { kind: 'task', title: custom[0].title, sub: custom[0].dueDate < t ? `${plural(daysBetween(t, custom[0].dueDate), 'day')} overdue` : 'Due today', primary: { label: 'Go to checklist', action: 'go-task', id: custom[0].id } };
-  if (fu.length) { const f = fu[0]; const app = getApp(f.appId); return { kind: 'followup', title: f.title, sub: `Coming up ${fmtDate(f.dueDate)}. Nothing urgent right now.`, primary: { label: 'Open application', action: 'app-open', id: app.id } }; }
+  if (fu.length) { const f = fu[0]; const app = getApp(f.appId); return { kind: 'followup', taskId: f.id, title: f.title, sub: `Coming up ${fmtDate(f.dueDate)}. Nothing urgent right now.`, primary: { label: 'Open application', action: 'app-open', id: app.id } }; }
   const fresh = state.jobs.filter(j => j.status === 'new').length;
   if (fresh) return { kind: 'review', title: `Review ${plural(fresh, 'new job')}`, sub: 'Save the ones you like and pass on the rest.', primary: { label: 'Review jobs', action: 'go', view: 'jobs', status: 'review' } };
   return { kind: 'empty', title: "You're all caught up", sub: 'Nothing is due. Add a job you found, or check back tomorrow.', primary: { label: 'Add a job', action: 'job-add-open' } };
 }
 
 /* ============ Views ============ */
+function greetSummary() {
+  const active = state.applications.filter(appActive).length, t = today();
+  const pend = state.tasks.filter(x => !x.done && x.type === 'followup' && appActive(getApp(x.appId)));
+  const over = pend.filter(x => x.dueDate < t).length;
+  return `You have ${plural(active, 'active application')} and ${plural(pend.length, 'pending follow-up')}${over ? ` (${over} overdue)` : ''}.`;
+}
 function viewDashboard() {
   const step = nextStep();
   const t = today();
@@ -1142,6 +1440,7 @@ function viewDashboard() {
       <div class="task-row"><label class="check"><input type="checkbox" data-action="task-complete" data-id="${x.id}"><span class="t">${esc(x.title)}</span></label></div>
       <div class="task-meta">${dueBadge(x.dueDate)}
         <button class="btn sm" type="button" data-action="resched-open" data-id="${x.id}">Reschedule</button>
+        ${app ? mailRow(x) : ''}
         ${app ? `<button class="btn sm ghost" type="button" data-action="app-open" data-id="${app.id}">Open application</button>` : `<button class="btn sm ghost danger" type="button" data-action="task-delete" data-id="${x.id}">Delete</button>`}
       </div>
       ${ui.reschedId === x.id ? `<form class="resched" data-form="resched" data-id="${x.id}" novalidate>
@@ -1163,7 +1462,7 @@ function viewDashboard() {
     rej: state.applications.filter(a => a.stage === 'Rejected').length
   };
   return `<div class="page">
-    <div class="dash-head"><div><h1>Your job search</h1><p>${profileLine()}</p></div>
+    <div class="dash-head"><div><h1>Hi ${esc(state.profile.name)}, welcome back!</h1><p class="greet-sum">${greetSummary()}</p><p class="muted">${profileLine()}</p></div>
       <button class="btn" type="button" data-action="open-profile">Edit preferences</button></div>
     ${state.profile.customized ? '' : `<div class="banner"><span>You're looking at an <strong>example profile</strong> with demo jobs. Edit your preferences to make it yours.</span><button class="btn sm" type="button" data-action="open-profile">Edit preferences</button></div>`}
     <section class="next" aria-labelledby="next-h">
@@ -1173,8 +1472,10 @@ function viewDashboard() {
       <div class="actions">
         <button class="btn primary lg" type="button" data-action="${step.primary.action}" ${dataAttrs(step.primary)}>${esc(step.primary.label)}</button>
         ${step.secondary ? `<button class="btn lg" type="button" data-action="${step.secondary.action}" ${dataAttrs(step.secondary)}>${esc(step.secondary.label)}</button>` : ''}
+        ${step.taskId && getTask(step.taskId) ? mailRow(getTask(step.taskId)) : ''}
       </div>
     </section>
+    ${funnelCard()}
     <div class="dash-grid">
       <section class="card g-list" aria-labelledby="list-h"><h2 id="list-h">Upcoming actions</h2>
         <form class="inline-form" data-form="task-add" novalidate>
@@ -1242,6 +1543,7 @@ function jobCard(j) {
   const aiRow = `<div class="actions-row ai-row" role="group" aria-label="AI tools">
     ${busyA ? '<button class="btn" type="button" disabled aria-busy="true">Scoring…</button>' : ai ? `<button class="btn" type="button" data-action="ai-open" data-id="${j.id}">View AI analysis</button>` : `<button class="btn" type="button" data-action="ai-analyze" data-id="${j.id}">Score fit with AI</button>`}
     ${busyT ? '<button class="btn" type="button" disabled aria-busy="true">Writing CV…</button>' : `<button class="btn" type="button" data-action="tailor-open" data-id="${j.id}">${j.tailored ? 'View tailored CV' : 'Generate tailored CV'}</button>`}
+    ${busy.has('o' + j.id) ? '<button class="btn" type="button" disabled aria-busy="true">Writing…</button>' : `<button class="btn" type="button" data-action="out-open" data-id="${j.id}">${j.outreach ? 'View outreach message' : 'Draft outreach message'}</button>`}
   </div>`;
   return `<article class="job" id="job-${j.id}" aria-labelledby="jt-${j.id}">
     <div class="job-top"><div><h3 id="jt-${j.id}">${esc(j.title)}</h3><p class="co">${esc(j.company)}</p></div>
@@ -1258,6 +1560,7 @@ function jobCard(j) {
       ${j.description ? `<div><h4>About this job</h4><p class="desc">${esc(j.description)}</p></div>` : ''}
       ${a.reasons.length ? `<div><h4>How it fits your profile (quick check)</h4><ul class="reasons">${a.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
       ${j.notes ? `<div><h4>Your notes</h4><p>${esc(j.notes)}</p></div>` : ''}
+      ${payCalc(j, 'c')}
       <p class="hint">${j.demo ? 'Demo data: this posting is made up for illustration and has not been verified.' : 'Added by you. Check the details against the original listing.'}</p>
     </div>` : ''}
   </article>`;
@@ -1330,12 +1633,14 @@ function render() {
 /* ============ Forms: helpers ============ */
 function field(o) {
   const id = `${o.p}-${o.name}`;
-  const common = `id="${id}" name="${o.name}" ${o.required ? 'required' : ''} aria-describedby="${id}-hint ${id}-err"`;
+  const common = `id="${id}" name="${o.name}" ${o.required ? 'required' : ''} aria-describedby="${id}-hint ${id}-err${o.tip ? ' ' + id + '-tip' : ''}"`;
   let input;
   if (o.type === 'select') input = `<select ${common}>${o.options.map(v => `<option value="${esc(v[0])}" ${v[0] === o.value ? 'selected' : ''}>${esc(v[1])}</option>`).join('')}</select>`;
   else if (o.type === 'textarea') input = `<textarea ${common} maxlength="${o.max || 2000}" placeholder="${esc(o.ph || '')}">${esc(o.value)}</textarea>`;
   else input = `<input type="${o.type || 'text'}" ${common} value="${esc(o.value)}" ${o.max ? `maxlength="${o.max}"` : ''} ${o.ph ? `placeholder="${esc(o.ph)}"` : ''} ${o.type === 'number' ? 'inputmode="numeric" min="0"' : ''}>`;
-  return `<div class="field"><label for="${id}">${o.label}${o.required ? '' : ' <span class="opt">(optional)</span>'}</label>${input}
+  const lab = `<label for="${id}">${o.label}${o.required ? '' : ' <span class="opt">(optional)</span>'}</label>`;
+  const head = o.tip ? `<div class="lblrow">${lab}<button class="tip-btn" type="button" data-action="tip-toggle" data-for="${id}-tip" aria-expanded="false" aria-label="What is “${esc(String(o.label).replace(/<[^>]*>/g, ''))}” used for?" title="${esc(o.tip)}">?</button></div>` : lab;
+  return `<div class="field">${head}${input}${o.tip ? `<p class="tip" id="${id}-tip" hidden>${esc(o.tip)}</p>` : ''}
     <p class="hint" id="${id}-hint" ${o.hint ? '' : 'hidden'}>${o.hint || ''}</p><p class="error" id="${id}-err" data-err="${o.name}" hidden></p></div>`;
 }
 function showErrors(form, errs) {
@@ -1365,16 +1670,18 @@ function openDlg(d, html, labelText) {
 function openProfile() {
   const p = state.profile;
   const body = `
-    ${field({ p: 'pf', name: 'role', label: 'Target role', value: p.role, required: true, max: 80 })}
-    ${field({ p: 'pf', name: 'location', label: 'Preferred location', value: p.location, required: true, max: 80, ph: 'City, State' })}
-    ${field({ p: 'pf', name: 'level', label: 'Experience level', type: 'select', value: p.level, required: true, options: Object.keys(LEVELS).map(k => [k, `${LEVELS[k].label} (${LEVELS[k].years})`]) })}
-    ${field({ p: 'pf', name: 'skills', label: 'Key skills', value: p.skills.join(', '), max: 300, hint: 'Separate with commas, like SQL, Excel, Tableau.' })}
+    ${field({ p: 'pf', name: 'name', label: 'Your name', value: p.name, required: true, max: 40, ph: 'Sandra', hint: 'Used in your dashboard greeting and in email and message drafts.' })}
+    ${field({ p: 'pf', name: 'role', label: 'Target role', value: p.role, required: true, max: 80, tip: TIPS.role })}
+    ${field({ p: 'pf', name: 'location', label: 'Preferred location', value: p.location, required: true, max: 80, ph: 'City, State', tip: TIPS.location })}
+    ${field({ p: 'pf', name: 'level', label: 'Experience level', type: 'select', value: p.level, required: true, tip: TIPS.level, options: Object.keys(LEVELS).map(k => [k, `${LEVELS[k].label} (${LEVELS[k].years})`]) })}
+    ${field({ p: 'pf', name: 'skills', label: 'Key skills', value: p.skills.join(', '), max: 300, hint: 'Separate with commas, like SQL, Excel, Tableau.', tip: TIPS.skills })}
     <div class="field"><span class="lab" id="arr-l">Work arrangement</span>
       <div class="checks" role="group" aria-labelledby="arr-l">${ARR.map(a => `<label><input type="checkbox" name="arrangements" value="${a}" ${p.arrangements.includes(a) ? 'checked' : ''}> ${a}</label>`).join('')}</div>
       <p class="hint">Leave all unchecked if you're open to anything.</p></div>
-    ${field({ p: 'pf', name: 'salaryMin', label: 'Minimum salary (USD per year)', type: 'number', value: p.salaryMin ?? '', ph: '75000' })}
+    ${field({ p: 'pf', name: 'salaryMin', label: 'Minimum salary (USD per year)', type: 'number', value: p.salaryMin ?? '', ph: '75000', tip: TIPS.salaryMin })}
     <div class="field"><label for="pf-theme">Appearance</label><select id="pf-theme" name="theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(o => `<option value="${o[0]}" ${state.settings.theme === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div>
     <div class="section-sep"><h3>Your master CV</h3>
+      <div class="cv-badge-row" id="cv-badge-box">${cvBadgeHtml()}</div>
       <p class="hint" style="margin:6px 0 12px">Upload a PDF, Word (.docx) or text file, or paste the text. It is stored only in this browser. PDFs with columns or graphics can come out jumbled, so check the text below.</p>
       <div class="field"><label for="cvFile">Upload your CV</label><input type="file" id="cvFile" accept=".pdf,.docx,.txt,.md"><p class="${state.cv.text ? 'hint' : 'hint'}" id="cv-status" role="status" aria-live="polite">${state.cv.text ? `Saved: ${esc(state.cv.name || 'pasted text')} (${state.cv.text.length.toLocaleString()} characters).` : 'No CV saved yet.'}</p></div>
       ${field({ p: 'pf', name: 'cvText', label: 'CV text', type: 'textarea', value: state.cv.text, max: MAX_CV, ph: 'Or paste your CV here' })}
@@ -1406,7 +1713,8 @@ function zoneHtml(kind, ask) {
 }
 function saveProfile(form) {
   const f = new FormData(form), errs = {};
-  const role = (f.get('role') || '').trim(), loc = (f.get('location') || '').trim();
+  const role = (f.get('role') || '').trim(), loc = (f.get('location') || '').trim(), pname = (f.get('name') || '').trim();
+  if (!pname) errs.name = 'Enter your first name.';
   if (!role) errs.role = 'Enter the role you are looking for.';
   if (!loc) errs.location = 'Enter a city or area.';
   const sal = parseNum(f.get('salaryMin'));
@@ -1418,7 +1726,7 @@ function saveProfile(form) {
   const model = (f.get('model') || '').trim() || DEFAULT_MODEL;
   if (!/^[a-z0-9][a-z0-9._-]{2,60}$/i.test(model)) errs.model = 'Enter a model name such as gemini-3.6-flash.';
   if (!showErrors(form, errs)) return;
-  Object.assign(state.profile, { role, location: loc, level: f.get('level'), skills: splitList(f.get('skills')), arrangements: f.getAll('arrangements'), salaryMin: sal, customized: true });
+  Object.assign(state.profile, { name: pname, role, location: loc, level: f.get('level'), skills: splitList(f.get('skills')), arrangements: f.getAll('arrangements'), salaryMin: sal, customized: true });
   if (cvText !== state.cv.text) state.cv = { text: cvText, name: cvText ? (state.cv.name || 'Pasted text') : '', updatedAt: new Date().toISOString() };
   Object.assign(state.settings, { model, autoAnalyze: f.has('autoAnalyze'), pageReader: f.has('pageReader'), redact: f.has('redact'), theme: ['system', 'light', 'dark'].includes(f.get('theme')) ? f.get('theme') : 'system' });
   applyTheme();
@@ -1488,10 +1796,13 @@ function openApp(id, focusName) {
       <button class="btn sm" type="button" data-action="quick-follow" data-days="7">In 1 week</button>
       <button class="btn sm" type="button" data-action="quick-follow" data-days="14">In 2 weeks</button>
       <button class="btn sm ghost" type="button" data-action="quick-follow" data-days="">Clear date</button></div>
+    <div class="field"><a class="btn sm" href="${esc(followMail(a).href)}" data-mail-app="${esc(a.id)}">Send follow-up email</a><p class="hint">Opens your mail app with a ready-made message to the email in your contact details.</p></div>
     ${field({ p: 'af', name: 'contactName', label: 'Contact name', value: a.contactName || '', max: 80 })}
     ${field({ p: 'af', name: 'contactDetails', label: 'Contact details', value: a.contactDetails || '', max: 200, ph: 'Email, phone or LinkedIn' })}
     ${field({ p: 'af', name: 'url', label: 'Original listing URL', type: 'url', value: a.url || '', ph: 'https://…', hint: j.demo && !a.url ? 'This is a demo job with no real listing. Add a link if you have one.' : '' })}
-    ${field({ p: 'af', name: 'notes', label: 'Notes', type: 'textarea', value: a.notes || '', max: 2000, ph: 'What you sent, who you spoke with, next ideas…' })}`;
+    ${field({ p: 'af', name: 'notes', label: 'Notes', type: 'textarea', value: a.notes || '', max: 2000, ph: 'What you sent, who you spoke with, next ideas…' })}
+    ${getJob(a.jobId) ? payCalc(getJob(a.jobId), 'a') : ''}
+    ${prepSection(a)}`;
   const foot = `<div class="confirm-zone" data-zone="remove"><button class="btn danger" type="button" data-action="remove-ask">Remove from tracker</button></div>
     <div class="grp"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">Save changes</button></div>`;
   openDlg(dlg.app, shell(`${j.title} · ${j.company}`, [j.location, j.arrangement].filter(Boolean).join(' · '), body, foot, `data-form="app" data-id="${a.id}"`), `Application: ${j.title} at ${j.company}`);
@@ -1510,7 +1821,7 @@ function saveApp(form) {
   if (!showErrors(form, errs)) return;
   const j = getJob(a.jobId), name = j ? j.company : 'this employer';
   const prevStage = a.stage, prevFU = a.followUpDate;
-  Object.assign(a, v);
+  Object.assign(a, v); a.furthest = furthestOf(a);
   if (j && v.url) j.url = v.url;
   syncFollowUp(a);
   if (prevStage !== v.stage) log(`Moved ${name} to ${v.stage}`);
@@ -1561,6 +1872,13 @@ function reopenTask(id, quiet) {
 }
 
 const actions = {
+  'tip-toggle': (d, el) => { const p = document.getElementById(d.for); if (!p) return; p.hidden = !p.hidden; el.setAttribute('aria-expanded', String(!p.hidden)); },
+  'prep-gen': d => prepFlow(d.id),
+  'out-open': d => openOutreach(d.id),
+  'out-gen': d => outreachFlow(d.id),
+  'out-copy': async () => { const ta = $('#out-text'); if (!ta) return; try { await navigator.clipboard.writeText(ta.value); toast('Copied to your clipboard.'); } catch (e) { ta.focus(); ta.select(); toast(document.execCommand && document.execCommand('copy') ? 'Copied to your clipboard.' : 'Select the text and copy it manually.'); } },
+  'mail-done': d => { ui.mailed = null; completeTask(d.id); },
+  'mail-dismiss': () => { ui.mailed = null; render(); },
   'open-profile': () => openProfile(),
   'close-dialog': (d, el) => el.closest('dialog').close(),
   'toast-action': () => { const fn = toastAction; hideToast(); if (fn) fn(); },
@@ -1747,6 +2065,26 @@ document.addEventListener('change', e => {
   const f = e.target && e.target.closest && e.target.closest('form[data-form="iv"],form[data-form="un"],form[data-form="chk"]');
   if (f) calPreview(f);
 }));
+document.addEventListener('input', e => {
+  const t = e.target; if (!t || !t.matches) return;
+  if (t.matches('[data-pc-in]')) { const box = t.closest('[data-pc]'); if (box) pcUpdate(box, false); }
+  else if (t.id === 'pf-cvText') refreshCvBadge();
+  else if (t.id === 'out-text' || t.id === 'out-subject') updateOut();
+});
+document.addEventListener('change', e => {
+  const t = e.target; if (!t || !t.matches) return;
+  if (t.matches('[data-pc-in]')) { const box = t.closest('[data-pc]'); if (box) pcUpdate(box, true); }
+  else if (t.matches('[data-prepnote]')) { const form = t.closest('form[data-form="app"]'), a = form && getApp(form.dataset.id); if (a) { ensurePrep(a).notes[t.dataset.prepnote] = t.value.slice(0, 3000); save(); } }
+  else if (t.name === 'stage' && t.closest('form[data-form="app"]')) { const f = t.closest('form'), on = t.value === 'Interviewing', sec = f.querySelector('[data-prep]'), lock = f.querySelector('[data-prep-locked]'); if (sec) sec.hidden = !on; if (lock) lock.hidden = on; }
+  else if (t.id === 'out-channel') { const em = t.value === 'email', row = $('#out-subject-row'), m = $('#out-mail'); if (row) row.hidden = !em; if (m) m.hidden = !em; }
+});
+document.addEventListener('keydown', e => { const t = e.target; if (e.key === 'Enter' && t && t.matches && t.matches('input[data-pc-in]')) e.preventDefault(); });
+document.addEventListener('click', e => {
+  const m = e.target.closest && e.target.closest('a[data-mail]');
+  if (m) { ui.mailed = m.dataset.mail; setTimeout(render, 250); return; }
+  const ma = e.target.closest && e.target.closest('a[data-mail-app]');
+  if (ma) { const t = state.tasks.find(x => x.type === 'followup' && x.appId === ma.dataset.mailApp && !x.done); toast('Your mail app should have opened.', t ? { label: 'Log follow-up as done', fn: () => completeTask(t.id) } : undefined); }
+});
 let tcTimer = null;
 document.addEventListener('input', e => {
   if (!e.target || e.target.id !== 'tc-text') return;
